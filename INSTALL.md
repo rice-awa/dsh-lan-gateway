@@ -1,34 +1,32 @@
 # dsh-lan-gateway 安装指南
 
-本插件把 DeepSeek Harness 的 Web GUI 安全地开放到局域网 / 公网，并附赠一个管理用
-skill。功能与用法见 [README](README.md)，本文件只讲安装。
+把 DeepSeek Harness 的 Web GUI 安全地开放到局域网 / 公网（含 TLS 与官方设置页
+卡片）。功能与用法见 [README](README.md)；本文件只有一件事：**装好它**。
 
-## 前提
+本文件分两条路径：
 
-- 一个可用的 dsh profile（下文以 `web` 为例，换成你的 profile 名即可）。
-- pnpm（dsh profile 的插件管理基于 pnpm，`dsh plugin ... add` 会把参数转发给
-  profile 目录下的 `pnpm`）。若你用的 dsh 发行版自带 pnpm，可跳过全局安装。
+- **For agents** —— 给 dsh / Claude 等 agent 的完整执行流程（含 allowBuilds 等
+  坑位与验证步骤），把这段话发给 agent 让它自己读完照做即可。
+- **For humans** —— 给真人用户的两分钟速览（你只需要用一两条命令，不用管细节）。
 
-## 方式一：让 agent 安装（推荐）
+---
 
-把下面这段话原样发给你的 dsh agent：
+## For agents：完整安装流程
 
-> 帮我从 `https://github.com/rice-awa/dsh-lan-gateway` 安装这个 dsh 插件，遵循
-> `https://github.com/rice-awa/dsh-lan-gateway/blob/main/INSTALL.md`
-
-agent 会按本文件执行：用 `dsh plugin --profile web add` 装进 profile、处理
-`allowBuilds` 审批、把插件加进 bundle 列表，并回答你的后续问题。
-
-## 方式二：官方 CLI 手动安装
+### 1. 安装插件本体
 
 ```bash
 dsh plugin --profile web add github:rice-awa/dsh-lan-gateway
 ```
 
-### 处理 allowBuilds 审批
+> `dsh plugin ... add` 把剩余参数转发给 profile 目录里的 pnpm；`--profile` 必填。
+> 安装成功后插件会自动被加入 `~/.dsh/profiles/web/package.json` 的依赖与
+> `dsh.profile.bundles` 列表，无需手工编辑。
 
-`dsh plugin add` 安装的包带 `prepack` 构建脚本（tsdown 构建 host + client 两个
-bundle），pnpm 11 默认会拦截。首次安装时你会看到：
+### 2. 处理 allowBuilds 审批
+
+git 安装会运行包的 `prepack` 构建脚本（tsdown 构建 host + client 两个 bundle），
+pnpm 11 默认拦截，报错形如：
 
 ```
 [ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED] Failed to prepare git-hosted package ...
@@ -43,28 +41,103 @@ allowBuilds:
   "@dsh-external/dsh-lan-gateway@https://codeload.github.com/rice-awa/dsh-lan-gateway/tar.gz/<提交>: true"
 ```
 
-（条目里的 `<提交>` 会随版本变化，以你实际收到的报错为准；或者运行
-`pnpm approve-builds` 交互选择。）保存后重新执行上一条 `dsh plugin add` 命令即可。
+条目里的 `<提交>` 随版本变化，以实际报错为准；也可运行 `pnpm approve-builds`
+交互选择。批准后**重新执行第 1 步的 add 命令**。
 
-> 为什么会有这一步：git 安装会在 pnpm 的临时目录里重建依赖并运行该包的构建脚本，
-> pnpm 11 的安全机制要求先批准包自身的构建，再批准其依赖（如 esbuild）的构建。
-> 两条都按报错提示补进 `allowBuilds` 即可。
+> 原理：git 安装会在 pnpm 临时目录里重建依赖并运行该包构建脚本。包自身与依赖
+> （如 esbuild）的构建可能都需要批准，按报错提示逐条补进 `allowBuilds` 即可。
 
-### 装配进 bundle 列表
+### 3. 决定启动方式（默认不自动启动）
 
-`dsh plugin add` 会更新 `~/.dsh/profiles/web/package.json` 的依赖并安装。插件默认
-**不自动启动**（`enabled: false`），需把 `@dsh-external/dsh-lan-gateway` 加进
-`dsh.profile.bundles` 列表（`package.json` 内），并在 `~/.dsh/profiles/web/cordis.patch.yml`
-中把 `enabled` 改成 `true` 才会在启动时监听。如果不打算开机自启，只想按需手动开启，
-也可以只加进 bundles、保持 `enabled: false`，之后在对话里用 `lan_gateway enable` 开启。
+插件默认 `enabled: false`——**不自动监听**。两种用法：
 
-然后重启 dsh：
+- **按需开启**（默认推荐）：什么都不改，装好即用。之后在对话里让 agent 执行
+  `lan_gateway enable`。
+- **开机自启**：在 `~/.dsh/profiles/web/cordis.patch.yml` 把 `enabled` 改为 `true`：
+
+  ```yaml
+  - id: dsh-lan-gateway
+    config:
+      enabled: true
+  ```
+
+### 4. 安装配套 skill
+
+让 agent 在对话里直接管理网关（开/关、设密码、轮换密钥、查状态、换 TLS 证书）。
+复制到任一 skill 发现根即可（有 watcher，放进去即生效，**无需重启**）：
+
+```bash
+mkdir -p ~/.dsh/skills
+cp ~/.dsh/profiles/web/node_modules/@dsh-external/dsh-lan-gateway/skills/lan-gateway.md \
+   ~/.dsh/skills/
+```
+
+> 其他发现根：`${DSH_AGENTS_HOME:-~/.agents}/skills/`、`<项目根>/.agents/skills/`。
+> 从源码仓库安装时，源文件在 `<仓库路径>/skills/lan-gateway.md`。
+> skill 的 frontmatter 已含 `name` 与 `description`（dsh 解析必需字段）；
+> `user-invocable` 用 kebab-case 写法（驼峰旧键会被 dsh 拒绝）。
+
+### 5. 重启 dsh 并验证
 
 ```bash
 dsh --profile web
 ```
 
-## 方式三：从源码构建（开发 / 贡献）
+验证三点：
+
+- **包已就位**：`ls ~/.dsh/profiles/web/node_modules/@dsh-external/dsh-lan-gateway/lib`
+  应看到 `index.js`、`client.js`、`index.d.ts`。
+- **监听开启**：对话里执行 `lan_gateway enable`（首次需先设密码，见下），日志应出现
+  `dsh-lan-gateway: listening on 0.0.0.0:3081 -> 127.0.0.1:<dsh端口>`。
+- **skill 生效**：对话里说「网关状态」，agent 应能调用 `lan_gateway` 工具。
+
+### 6. 首次使用：设置密码（必做）
+
+网关默认 `authRequired: true`——非 LAN 来源必须登录。未设密码时 `lan_gateway
+enable` 会**拒绝监听**（防止把 RCE 门户开放给非 LAN 来源）。让 agent 执行：
+
+- `lan_gateway set-password` 且 `password: <≥8 位密码>`——设置登录密码。
+- `lan_gateway enable`——开启监听。
+
+> 只有把 `authRequired` 配成 `false` 才会允许无密码监听，仅适合完全受信的 LAN
+> 环境。
+
+---
+
+## For humans：两分钟速览
+
+### 推荐：让 agent 装
+
+把下面这段话发给你的 dsh agent，剩下的事它都会做：
+
+> 帮我从 `https://github.com/rice-awa/dsh-lan-gateway` 安装这个 dsh 插件，遵循
+> `https://github.com/rice-awa/dsh-lan-gateway/blob/main/INSTALL.md`
+
+### 手动装（一条命令）
+
+```bash
+dsh plugin --profile web add github:rice-awa/dsh-lan-gateway
+```
+
+- 若报 `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`：按报错提示把那条 `allowBuilds`
+  条目补进 `~/.dsh/profiles/web/pnpm-workspace.yaml`，重新执行上面的命令。
+  详细说明见 [For agents 第 2 步](#2-处理-allowbuilds-审批)。
+- 重启 dsh 后，在对话里说 **「设置网关密码为 …」→「开启远程访问」** 即可。
+  （`lan_gateway` 是模型可调用工具，密码以参数传入、不写入配置、不回显。）
+
+### 可选：装配套 skill
+
+```bash
+mkdir -p ~/.dsh/skills
+cp ~/.dsh/profiles/web/node_modules/@dsh-external/dsh-lan-gateway/skills/lan-gateway.md \
+   ~/.dsh/skills/
+```
+
+装好后 agent 就能在对话里直接管理网关（开/关、设密码、查状态）。
+
+---
+
+## 开发者：从源码构建
 
 ```bash
 git clone https://github.com/rice-awa/dsh-lan-gateway.git
@@ -72,83 +145,29 @@ cd dsh-lan-gateway
 pnpm install
 pnpm build          # host：lib/index.js + lib/index.d.ts
 pnpm build:client   # client：lib/client.js（window.__ModuleLoader__ 格式）
-pnpm test           # 26 项测试
+pnpm test           # 38 项（网关 23 + UUID shim 3 + x509 4 + TLS 6）
 ```
 
 构建产物在 `lib/`（已被 `.gitignore` 排除，不随仓库提交）。
 
-### 以本地链接装进 profile
+以本地链接装进 profile（等价于 npm link）：
 
 ```bash
-# 在 profile 里以 link: 方式引用本地仓库（等价于 npm link）
 cd ~/.dsh/profiles/web
 pnpm add "link:/path/to/dsh-lan-gateway"
 ```
 
-## 安装配套 skill（可选但推荐）
-
-仓库里的 [skills/lan-gateway.md](skills/lan-gateway.md) 是一个 dsh 技能：让 agent
-在对话中直接管理网关（开/关、设密码、轮换密钥、查状态）。插件本体装好后，把它
-复制到任一 skill 发现根即可（有 watcher，放进去即生效，无需重启）：
-
-```bash
-# 用户级（推荐，对所有项目生效）：$DSH_HOME/skills/
-mkdir -p ~/.dsh/skills
-
-# 从已安装的包拷贝（git / npm 安装的用户，包里已带 skills/）
-cp ~/.dsh/profiles/web/node_modules/@dsh-external/dsh-lan-gateway/skills/lan-gateway.md \
-   ~/.dsh/skills/
-
-# 或从源码仓库拷贝（开发用户）
-# cp <仓库路径>/skills/lan-gateway.md ~/.dsh/skills/
-
-# 其他发现根（按需）：${DSH_AGENTS_HOME:-~/.agents}/skills/、<项目根>/.agents/skills/
-```
-
-装好后在对话里说「设置网关密码为 …」「开启远程访问」「网关状态」即可，agent 会
-自动调用 `lan_gateway` 工具完成。
-
-> dsh 官方对 skill 的要求（已核实）：frontmatter 需含 `name` 与 `description`
-> （本技能均已提供）；`user-invocable` 默认即可用。旧式驼峰键（如
-> `userInvocable`）会被拒绝，必须以 kebab-case 编写。
-
-## 安装后验证
-
-```bash
-# 确认包已就位（应看到 lib/index.js、lib/client.js 等）
-ls ~/.dsh/profiles/web/node_modules/@dsh-external/dsh-lan-gateway/lib
-
-# 启动后确认网关监听
-dsh --profile web
-# 在对话里让 agent 执行：lan_gateway enable
-# 日志应出现：dsh-lan-gateway: listening on 0.0.0.0:3081 -> 127.0.0.1:<dsh端口>
-```
-
-## 首次使用：设置密码
-
-网关默认 `authRequired: true`——非 LAN 来源必须登录。因此首次开启前需要先设密码
-（≥ 8 位）。最简单的方式是直接在 dsh 对话里说：
-
-> 设置网关密码为 `<你的密码>`
-
-agent 会调用 `lan_gateway set-password` 完成设置（密码以参数传入、不会写入配置文件、
-不会回显），然后执行 `lan_gateway enable` 开启监听。也可以随时在对话里说“查看网关
-状态”“关闭网关”“重置会话密钥”。
-
-> 未设密码时 `lan_gateway enable` 会拒绝监听并提示先设密码（防止把 RCE 门户开放给
-> 非 LAN 来源）；只有把 `authRequired` 配成 `false` 才会允许无密码监听（仅适合完全
-> 受信的 LAN 环境）。
-
 ## 常见问题
 
-- **`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`**：见上文“处理 allowBuilds 审批”。
+- **`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`**：见 [For agents 第 2 步](#2-处理-allowbuilds-审批)。
 - **`dsh plugin --profile <名> add ...` 报 `required option '--profile <name>'`**：
   `--profile` 是必填项；先确认 profile 存在（`~/.dsh/profiles/<名>/`）。
-- **端口 3081 被占用**：网关监听端口可在 bundle patch 的 config 里改
-  `gatewayPort`。
-- **局域网设备打开页面报 `crypto.randomUUID is not a function`**：client bundle
-  （UUID shim）未加载。确认插件在 bundles 列表里、`lib/client.js` 存在、并重启了
-  dsh。
+- **端口 3081 被占用**：改 `gatewayPort`（bundle patch 的 config，或 Settings →
+  Plugins 卡片）。
+- **局域网设备报 `crypto.randomUUID is not a function`**：client bundle（UUID
+  shim）未加载。确认插件在 bundles 列表里、`lib/client.js` 存在、并重启了 dsh。
+- **想用 HTTPS**：Settings → Plugins 卡片或配置里开 `tlsEnabled`（默认
+  `self-signed` 自动生成证书；或 `custom` 挂你自己的 PEM）。详见 README「配置项」。
 
 ## 卸载
 
@@ -158,8 +177,9 @@ dsh plugin --profile web remove @dsh-external/dsh-lan-gateway
 ```
 
 同时清理：`~/.dsh/profiles/web/package.json` 的 `dsh.profile.bundles` 列表、
-`cordis.patch.yml` 里相关条目，以及 `~/.dsh/lan-gateway/state.json`（含密码哈希与
-cookie secret，确认不需要后删除）。
+`cordis.patch.yml` 里相关条目、`~/.dsh/skills/lan-gateway.md`（如已装），以及
+`~/.dsh/lan-gateway/`（state.json 密码哈希、cookie secret、TLS 证书，确认不需要后
+删除）。
 
 ## 许可
 

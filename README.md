@@ -37,7 +37,7 @@
 自动管理网关——开/关监听、设置或更换远程访问密码、轮换会话密钥、查看状态。装上后
 直接说「设置网关密码为 …」「开启远程访问」即可，agent 会调用 `lan_gateway` 工具
 完成（密码以参数传入，不写入配置、不回显）。安装方式见
-[INSTALL.md](INSTALL.md#安装配套-skill)。
+[INSTALL.md](INSTALL.md#for-agents完整安装流程)。
 
 ## 手动安装
 
@@ -52,7 +52,7 @@ dsh plugin --profile web add github:rice-awa/dsh-lan-gateway
 > pnpm 会要求先在其构建脚本白名单（`allowBuilds`）中批准本包，否则报
 > `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`。把报错提示中的条目（或 `pnpm approve-builds`
 > 的选项）写进 `~/.dsh/profiles/web/pnpm-workspace.yaml` 再重试即可。完整步骤见
-> [INSTALL.md](INSTALL.md#方式-a使用官方-cli-安装)。
+> [INSTALL.md](INSTALL.md#for-agents完整安装流程)。
 
 ### 方式 B：从源码构建
 
@@ -62,7 +62,7 @@ cd dsh-lan-gateway
 pnpm install
 pnpm build          # host（lib/index.js）
 pnpm build:client   # client（lib/client.js，window.__ModuleLoader__ 格式）
-pnpm test           # 26 项（网关 23 + UUID shim 3）
+pnpm test           # 38 项（网关 23 + UUID shim 3 + x509 4 + TLS 6）
 ```
 
 ## 使用
