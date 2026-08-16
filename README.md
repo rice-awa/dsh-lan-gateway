@@ -39,6 +39,16 @@
 完成（密码以参数传入，不写入配置、不回显）。安装方式见
 [INSTALL.md](INSTALL.md#for-agents完整安装流程)。
 
+## 移动端访问（推荐）
+
+在手机 / 平板上通过网关访问 GUI 时，桌面布局体验不佳。推荐同时安装
+[dsh-web-mobile](https://github.com/mexiaosqwq/dsh-web-mobile)（移动端 UI 适配），
+与本插件配合使用：
+
+```bash
+dsh plugin --profile web add github:mexiaosqwq/dsh-web-mobile
+```
+
 ## 手动安装
 
 ### 方式 A：使用官方 CLI 安装
