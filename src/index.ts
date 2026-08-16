@@ -26,10 +26,12 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { randomBytes } from 'node:crypto'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import z from '@deepseek-ai/schemastery'
-import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import { settingsNamespace, type SettingsScope } from '@deepseek-ai/dsh-settings'
 import { DEFAULT_LAN_CIDR_STRINGS } from './auth.ts'
 import { LanGateway } from './gateway.ts'
+import { readBody } from './login.ts'
 import {
   loadState,
   saveState,
@@ -55,6 +57,12 @@ export const inject = ['webServer', 'tools']
 /** Minimal surface of the dsh web server service this plugin reads. */
 export interface WebServerSurface {
   port: number
+  /** Register an exact/prefix HTTP route owned by this plugin. */
+  register(route: {
+    kind: 'exact' | 'prefix'
+    path: string
+    handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>
+  }): () => void
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -111,6 +119,9 @@ export interface Config {
 
 /** The `lan-gateway` user-settings namespace, mirroring the composition schema. */
 const NS = settingsNamespace('lan-gateway')
+
+/** Optional config keys: an empty submitted value clears them back to the composition layer. */
+const OPTIONAL_CONFIG_KEYS = new Set(['dshTargetPort', 'tlsCertPath', 'tlsKeyPath'])
 
 /** Schemastery configuration validated by the Loader. */
 export const Config: z<Config> = z.object({
@@ -174,6 +185,43 @@ function tlsStatusLine(cfg: Config): string {
     return `self-signed [${info.subject}] exp ${info.validTo}`
   } catch (error) {
     return `self-signed (unavailable: ${error instanceof Error ? error.message : String(error)})`
+  }
+}
+
+/** Whether `hostname` is loopback (127/8, localhost, ::1). */
+function isLoopbackHost(hostname: string): boolean {
+  if (hostname === 'localhost' || hostname === '[::1]' || hostname === '::1') return true
+  const parts = hostname.split('.')
+  return (
+    parts.length === 4
+    && parts[0] === '127'
+    && parts.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255)
+  )
+}
+
+/**
+ * Same-origin loopback fence for the config route (mirrors the fence the dsh
+ * host uses for its own /api, and what dsh-lan-gateway's sibling plugins do):
+ * the Host must be loopback (the gateway rewrites it), cross-site fetches are
+ * refused, and any Origin must match the Host the browser actually used.
+ */
+function isTrustedRequest(req: IncomingMessage): boolean {
+  const host = req.headers?.host
+  if (typeof host !== 'string' || host === '') return false
+  let hostUrl: URL
+  try {
+    hostUrl = new URL(`http://${host}`)
+  } catch {
+    return false
+  }
+  if (!isLoopbackHost(hostUrl.hostname)) return false
+  if (req.headers?.['sec-fetch-site'] === 'cross-site') return false
+  const origin = req.headers?.origin
+  if (origin === undefined) return true
+  try {
+    return new URL(origin).host === hostUrl.host
+  } catch {
+    return false
   }
 }
 
@@ -256,10 +304,105 @@ export function apply(ctx: Context, config: Config): void {
   // settings service exists, the section (composition base + user overrides)
   // is the authoritative config, and every committed change re-syncs the
   // listener — so the Settings → Plugins page adjusts the gateway live.
-  installSettingsSection(ctx, NS, Config, config, {
-    setSource: (source) => { configSource = source },
-    onChange: () => { void syncGateway('settings change') },
+  // Registered directly (not via installSettingsSection) so the scope handle
+  // is available to the /lan-gateway/config route for writes.
+  let settingsScope: SettingsScope<Config> | undefined
+  ctx.inject(['settings'], (sctx) => {
+    const scope = sctx.settings.register(NS, Config, { base: config })
+    settingsScope = scope
+    configSource = () => scope.get()
+    sctx.effect(() => scope.watch(() => { void syncGateway('settings change') }))
+    sctx.effect(() => () => {
+      // The settings provider went away (disposal / provider reload): fall
+      // back to the composition entry so the plugin keeps working as composed.
+      configSource = () => config
+      settingsScope = undefined
+    })
+    void syncGateway('settings attach')
   })
+
+  // The Settings → Plugins card reads and writes through this loopback-only
+  // JSON route (ModLens-style: the browser never touches the settings seam
+  // directly, so the card has no service dependencies to resolve).
+  const configRouteHandler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    const send = (status: number, body: unknown): void => {
+      res.writeHead(status, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(body))
+    }
+    if (!isTrustedRequest(req)) {
+      send(403, { error: 'request refused: this route answers loopback-origin requests only' })
+      return
+    }
+    if (req.method === 'GET') {
+      const cfg = effective()
+      send(200, {
+        config: cfg,
+        running: gateway !== undefined,
+        port: cfg.gatewayPort,
+        tls: tlsStatusLine(cfg),
+        lastError: lastError ?? null,
+      })
+      return
+    }
+    if (req.method !== 'POST') {
+      send(405, { error: 'method not allowed' })
+      return
+    }
+    const body = await readBody(req, 64 * 1024, res)
+    if (body === undefined) return // response already sent (413/400)
+    let submitted: unknown
+    try {
+      submitted = JSON.parse(body)
+    } catch {
+      send(400, { error: 'invalid JSON body' })
+      return
+    }
+    if (typeof submitted !== 'object' || submitted === null || Array.isArray(submitted)) {
+      send(400, { error: 'body must be a config object' })
+      return
+    }
+    // The schema callable validates and fills defaults; it throws with a
+    // descriptive message on any invalid value.
+    let candidate: Config
+    try {
+      candidate = Config(submitted as Config)
+    } catch (error) {
+      send(400, { error: error instanceof Error ? error.message : String(error) })
+      return
+    }
+    if (settingsScope === undefined) {
+      send(409, { error: 'settings service unavailable — edit the profile patch (cordis.patch.yml) instead' })
+      return
+    }
+    // Build the next user section: drop null/undefined and empty optionals
+    // (an empty path field re-inherits the composition layer).
+    const section: Record<string, unknown> = {}
+    for (const [key, value] of Object.entries(candidate)) {
+      if (value === null || value === undefined) continue
+      if (typeof value === 'string' && value === '' && OPTIONAL_CONFIG_KEYS.has(key)) continue
+      section[key] = value
+    }
+    try {
+      await settingsScope.replace(section)
+      // Let the listener restart settle before reporting, so `running` is
+      // accurate instead of a mid-restart snapshot.
+      await syncGateway('config route save')
+      const cfg = effective()
+      send(200, {
+        config: cfg,
+        running: gateway !== undefined,
+        port: cfg.gatewayPort,
+        tls: tlsStatusLine(cfg),
+        lastError: lastError ?? null,
+      })
+    } catch (error) {
+      send(409, { error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+  ctx.effect(
+    () => ctx.webServer.register({ kind: 'exact', path: '/lan-gateway/config', handler: configRouteHandler }),
+    'dsh-lan-gateway: config route',
+  )
 
   const controller: GatewayController = {
     status(): ToolResult {

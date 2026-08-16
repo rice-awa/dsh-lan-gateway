@@ -1,16 +1,17 @@
 /**
  * The lan-gateway settings card shown in the official DSH Settings → Plugins
- * page (the `settings.plugin.item` slot). It stages edits over the
- * `lan-gateway` settings namespace and writes them on save, mirroring the
- * shipped cards' staged form: a save is one explicit gesture, and a field's
- * effective value is the user layer over the composition layer.
+ * page (the `settings.plugin.item` slot).
+ *
+ * ModLens-style: the card carries NO injected services. It reads and writes
+ * the loopback-only `/lan-gateway/config` host route (the browser never sees
+ * the settings seam or any secret), so the client bundle's only dependency is
+ * the `slots` service that every plugin already has.
  *
  * @module @dsh-external/dsh-lan-gateway/client/card
  */
 
-import { useState, useSyncExternalStore, type ChangeEvent, type ReactNode } from 'react'
-import type { SettingsScope } from '@deepseek-ai/dsh-client-runtime/client'
-import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import { useEffect, useState, type ChangeEvent, type ReactNode } from 'react'
+import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 
 /**
  * The official Settings → Plugins page declares the `settings.plugin.item`
@@ -25,7 +26,10 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   }
 }
 
-/** The `lan-gateway` settings section shape (subset of the host Config). */
+/** Props the renderer binds for this card (unused — the card is self-loading). */
+export type LanGatewayCardProps = PropsRuntime<'settings.plugin.item'>
+
+/** The wire shape of the `lan-gateway` config section. */
 export interface LanGatewaySettings {
   enabled?: boolean
   gatewayPort?: number
@@ -41,16 +45,131 @@ export interface LanGatewaySettings {
   tlsCertMaxAgeDays?: number
 }
 
-/** What the plugin's slot entry injects: the bound scope and the translator. */
-export interface LanGatewayCardFace {
-  scope: SettingsScope<LanGatewaySettings>
-  t: (key: string) => string
+/** GET /lan-gateway/config response. */
+interface RouteState {
+  config: LanGatewaySettings
+  running: boolean
+  port: number
+  tls: string
+  lastError: string | null
 }
 
-/** Props the renderer binds for this card. */
-export type LanGatewayCardProps =
-  PropsRuntime<'settings.plugin.item'>
-  & InjectFace<LanGatewayCardFace>
+/* ------------------------------------------------------------------ */
+/* Bilingual copy (ModLens-style: two small sets, picked by browser)   */
+/* ------------------------------------------------------------------ */
+
+interface Labels {
+  title: string
+  description: string
+  unsaved: string
+  save: string
+  saving: string
+  discard: string
+  reset: string
+  overridden: string
+  readOnly: string
+  saveFailed: string
+  loadFailed: string
+  emptyMeansClear: string
+  running: string
+  stopped: string
+  tls: string
+  lastError: string
+  [key: `field.${string}`]: string
+  [key: `hint.${string}`]: string
+}
+
+const LABELS: Record<'zh' | 'en', Labels> = {
+  zh: {
+    title: 'LAN 网关',
+    description: '远程访问开关、端口、TLS 证书、受信网段等网关设置',
+    unsaved: '未保存',
+    save: '保存',
+    saving: '保存中…',
+    discard: '放弃',
+    reset: '重置',
+    overridden: '已覆盖',
+    readOnly: '网关设置当前不可用（读不到配置路由）。',
+    saveFailed: '保存未生效，请检查输入后重试。',
+    loadFailed: '加载网关配置失败。',
+    emptyMeansClear: '留空 = 使用默认',
+    running: '运行中',
+    stopped: '已停止',
+    tls: 'TLS',
+    lastError: '上次错误',
+    'field.enabled': '启用网关',
+    'hint.enabled': '启动时监听 0.0.0.0 网关端口',
+    'field.gatewayPort': '网关端口',
+    'hint.gatewayPort': '绑定到 0.0.0.0 的监听端口（默认 3081）',
+    'field.dshTargetPort': 'dsh 目标端口',
+    'hint.dshTargetPort': '留空则自动跟随 dsh web 端口（默认 3080）',
+    'field.lanCidrs': '免密 LAN 网段',
+    'hint.lanCidrs': '逗号分隔的 CIDR，如 10.0.0.0/8, 192.168.0.0/16',
+    'field.authRequired': '非 LAN 访问需要密码',
+    'hint.authRequired': '公网来源必须登录后才能访问',
+    'field.cookieMaxAgeDays': '会话有效期（天）',
+    'hint.cookieMaxAgeDays': '登录 cookie 的存活天数（默认 7）',
+    'field.tlsEnabled': '启用 TLS（HTTPS）',
+    'hint.tlsEnabled': '以 HTTPS 提供网关服务，浏览器不再提示不安全',
+    'field.tlsMode': '证书来源',
+    'hint.tlsMode': 'self-signed = 自动生成自签名证书；custom = 使用自己的证书',
+    'field.tlsSelfSignedHosts': '自签名证书域名/IP',
+    'hint.tlsSelfSignedHosts': '逗号分隔，写入证书 SAN，如 localhost, 192.168.1.5',
+    'field.tlsCertPath': '证书文件路径（custom）',
+    'hint.tlsCertPath': 'PEM 格式证书（或证书链）的绝对路径',
+    'field.tlsKeyPath': '私钥文件路径（custom）',
+    'hint.tlsKeyPath': '与证书配套的 PEM 私钥绝对路径',
+    'field.tlsCertMaxAgeDays': '自签名证书有效期（天）',
+    'hint.tlsCertMaxAgeDays': '默认 825（约 27 个月）',
+  },
+  en: {
+    title: 'LAN Gateway',
+    description: 'Remote-access switch, port, TLS certificate, trusted CIDRs and more',
+    unsaved: 'Unsaved',
+    save: 'Save',
+    saving: 'Saving…',
+    discard: 'Discard',
+    reset: 'Reset',
+    overridden: 'overridden',
+    readOnly: 'Gateway settings unavailable (config route unreachable).',
+    saveFailed: 'The save did not land — check the inputs and retry.',
+    loadFailed: 'Failed to load gateway configuration.',
+    emptyMeansClear: 'Empty = default',
+    running: 'Running',
+    stopped: 'Stopped',
+    tls: 'TLS',
+    lastError: 'Last error',
+    'field.enabled': 'Enable gateway',
+    'hint.enabled': 'Listen on the gateway port at boot',
+    'field.gatewayPort': 'Gateway port',
+    'hint.gatewayPort': 'Port bound on 0.0.0.0 (default 3081)',
+    'field.dshTargetPort': 'dsh target port',
+    'hint.dshTargetPort': 'Leave empty to follow the dsh web port (default 3080)',
+    'field.lanCidrs': 'Password-free LAN CIDRs',
+    'hint.lanCidrs': 'Comma separated CIDRs, e.g. 10.0.0.0/8, 192.168.0.0/16',
+    'field.authRequired': 'Password required for non-LAN',
+    'hint.authRequired': 'Internet sources must sign in before reaching the GUI',
+    'field.cookieMaxAgeDays': 'Session lifetime (days)',
+    'hint.cookieMaxAgeDays': 'Login cookie lifetime (default 7)',
+    'field.tlsEnabled': 'Enable TLS (HTTPS)',
+    'hint.tlsEnabled': 'Serve the gateway over HTTPS',
+    'field.tlsMode': 'Certificate source',
+    'hint.tlsMode': 'self-signed = auto-generated certificate; custom = your own files',
+    'field.tlsSelfSignedHosts': 'Self-signed hosts (SANs)',
+    'hint.tlsSelfSignedHosts': 'Comma separated DNS/IP names, e.g. localhost, 192.168.1.5',
+    'field.tlsCertPath': 'Certificate path (custom)',
+    'hint.tlsCertPath': 'Absolute path to a PEM certificate (or chain)',
+    'field.tlsKeyPath': 'Private key path (custom)',
+    'hint.tlsKeyPath': 'Absolute path to the matching PEM private key',
+    'field.tlsCertMaxAgeDays': 'Self-signed validity (days)',
+    'hint.tlsCertMaxAgeDays': 'Default 825 (about 27 months)',
+  },
+}
+
+function labels(): Labels {
+  const lang = (typeof navigator !== 'undefined' ? navigator.language : 'en').toLowerCase()
+  return lang.startsWith('zh') ? LABELS.zh : LABELS.en
+}
 
 /* ------------------------------------------------------------------ */
 /* Field model                                                         */
@@ -77,9 +196,9 @@ const FIELDS: readonly FieldDef[] = [
   { field: 'tlsSelfSignedHosts', kind: 'text' },
   { field: 'tlsCertPath', kind: 'text', optional: true },
   { field: 'tlsKeyPath', kind: 'text', optional: true },
+  { field: 'tlsCertMaxAgeDays', kind: 'number' },
 ]
 
-/** Render a stored value as draft text. */
 function formatValue(def: FieldDef, value: unknown): string {
   switch (def.kind) {
     case 'boolean': return value === true ? 'true' : 'false'
@@ -92,7 +211,7 @@ function formatValue(def: FieldDef, value: unknown): string {
 
 type Write = { kind: 'set'; value: unknown } | { kind: 'clear' }
 
-/** Parse draft text into a write; undefined blocks the save (invalid). */
+/** Parse draft text into a value for the POST body; undefined blocks saving. */
 function parseValue(def: FieldDef, text: string): Write | undefined {
   const trimmed = text.trim()
   switch (def.kind) {
@@ -116,128 +235,130 @@ function parseValue(def: FieldDef, text: string): Write | undefined {
 }
 
 /* ------------------------------------------------------------------ */
-/* Staged form                                                         */
-/* ------------------------------------------------------------------ */
-
-interface Draft {
-  text: string
-  clear: boolean
-}
-
-/* ------------------------------------------------------------------ */
 /* Card                                                                */
 /* ------------------------------------------------------------------ */
 
 /**
- * Render the LAN gateway card.
- * @param props - injected scope + translator.
- * @returns the card, or nothing while the namespace is not served.
+ * Render the LAN gateway card. Self-loading: fetches the config route on
+ * mount, posts the edited config on save.
+ * @param _props - unused; the card needs no injected face.
+ * @returns the card, or nothing while the route is unreachable.
  */
-export function LanGatewayCard({ scope, t }: LanGatewayCardProps) {
-  const snapshot = useSyncExternalStore(
-    (listener) => scope.subscribe(listener),
-    () => scope.getSnapshot(),
-  )
-  const [drafts, setDrafts] = useState<Record<string, Draft>>({})
-  const [saving, setSaving] = useState(false)
-  const [failed, setFailed] = useState(false)
+export function LanGatewayCard(_props: LanGatewayCardProps): ReactNode {
+  const t = labels()
   const [open, setOpen] = useState(false)
+  const [route, setRoute] = useState<RouteState | null>(null)
+  const [loadFailed, setLoadFailed] = useState(false)
+  const [drafts, setDrafts] = useState<Partial<Record<string, string>>>({})
+  const [saving, setSaving] = useState(false)
+  const [failed, setFailed] = useState<string | null>(null)
 
-  if (snapshot.status !== 'ready') return null
-  const writable = snapshot.writable
-  const disabled = !writable || saving
+  useEffect(() => {
+    let cancelled = false
+    fetch('/lan-gateway/config')
+      .then(async (response) => {
+        if (cancelled) return
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        setRoute(await response.json() as RouteState)
+      })
+      .catch(() => {
+        if (!cancelled) setLoadFailed(true)
+      })
+    return () => { cancelled = true }
+  }, [])
 
-  const effective = (field: keyof LanGatewaySettings): unknown =>
-    (snapshot.value as Record<string, unknown> | undefined)?.[field]
-  const baseOf = (field: keyof LanGatewaySettings): unknown =>
-    (snapshot.base as Record<string, unknown> | undefined)?.[field]
-  const userLayer = snapshot.user as Record<string, unknown> | undefined
-  const overridden = (field: string): boolean =>
-    userLayer !== undefined && Object.hasOwn(userLayer, field)
+  if (loadFailed) return null
+  if (route === null) return null
 
-  const draftOf = (def: FieldDef): Draft =>
-    drafts[def.field] ?? { text: formatValue(def, effective(def.field)), clear: false }
+  const { config } = route
+  const draftOf = (field: keyof LanGatewaySettings): string =>
+    drafts[field] ?? formatValue(FIELDS.find(f => f.field === field)!, config[field])
 
-  const stage = (field: string, draft: Draft): void => {
-    setDrafts(prev => ({ ...prev, [field]: draft }))
-    setFailed(false)
+  const stage = (field: string, text: string): void => {
+    setDrafts(prev => ({ ...prev, [field]: text }))
+    setFailed(null)
   }
 
   const resetField = (def: FieldDef): void => {
-    stage(def.field, { text: formatValue(def, baseOf(def.field)), clear: true })
+    setDrafts(prev => {
+      const next = { ...prev }
+      delete next[def.field]
+      return next
+    })
   }
 
   const discard = (): void => {
     setDrafts({})
-    setFailed(false)
+    setFailed(null)
   }
 
   const invalid = (): boolean =>
-    Object.entries(drafts).some(([field, draft]) => {
-      if (draft.clear) return false
+    Object.entries(drafts).some(([field, text]) => {
       const def = FIELDS.find(f => f.field === field)
-      return def === undefined || parseValue(def, draft.text) === undefined
+      return def === undefined || parseValue(def, text ?? '') === undefined
     })
 
+  const dirty = Object.keys(drafts).length > 0
+
   const save = async (): Promise<void> => {
-    const entries = Object.entries(drafts)
-    if (entries.length === 0 || saving || invalid()) return
+    if (!dirty || saving || invalid()) return
     setSaving(true)
-    setFailed(false)
+    setFailed(null)
     try {
-      for (const [field, draft] of entries) {
-        const def = FIELDS.find(f => f.field === field)
-        if (def === undefined) continue
-        if (draft.clear) {
-          await scope.unset(field)
-        } else {
-          const write = parseValue(def, draft.text)
-          if (write === undefined) continue
-          if (write.kind === 'clear') await scope.unset(field)
-          else await scope.set(field, write.value)
-        }
+      // Build the next full config: the loaded one with drafts applied.
+      const next: Record<string, unknown> = {}
+      for (const def of FIELDS) {
+        const text = drafts[def.field] ?? formatValue(def, config[def.field])
+        const write = parseValue(def, text)
+        if (write === undefined) continue
+        next[def.field] = write.kind === 'clear' ? null : write.value
       }
-      // The Host is the authority: verify every staged edit landed in the
-      // raw user layer; anything missing keeps the card dirty.
-      const latest = scope.getSnapshot()
-      const user = latest.user as Record<string, unknown> | undefined
-      const landed = entries.every(([field, draft]) =>
-        draft.clear ? (user === undefined || !Object.hasOwn(user, field)) : (user !== undefined && Object.hasOwn(user, field)),
-      )
-      if (landed) setDrafts({})
-      else setFailed(true)
+      const response = await fetch('/lan-gateway/config', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(next),
+      })
+      const body = await response.json().catch(() => ({})) as Partial<RouteState> & { error?: string }
+      if (!response.ok) {
+        setFailed(body.error ?? `HTTP ${response.status}`)
+        return
+      }
+      if (body.config !== undefined) {
+        setRoute({
+          config: body.config,
+          running: body.running ?? false,
+          port: body.port ?? 0,
+          tls: body.tls ?? '',
+          lastError: body.lastError ?? null,
+        })
+      }
+      setDrafts({})
     } catch {
-      setFailed(true)
+      setFailed(t.saveFailed)
     } finally {
       setSaving(false)
     }
   }
 
-  const dirty = Object.keys(drafts).length > 0
-
   const renderControl = (def: FieldDef): ReactNode => {
-    const draft = draftOf(def)
     const field = def.field
-    const labelKey = `field.${field}`
-    const label = t(labelKey)
-    const hintKey = `hint.${field}`
-    const hint = t(hintKey)
-    const isOverridden = overridden(field)
+    const label = t[`field.${field}`]
+    const hint = t[`hint.${field}`]
+    const text = draftOf(field)
     switch (def.kind) {
       case 'boolean':
         return (
           <label style={styles.checkRow}>
             <input
               type="checkbox"
-              checked={draft.text === 'true'}
-              disabled={disabled}
+              checked={text === 'true'}
+              disabled={saving}
               onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                stage(field, { text: e.target.checked ? 'true' : 'false', clear: false })}
+                stage(field, e.target.checked ? 'true' : 'false')}
             />
             <span>{label}</span>
-            {isOverridden ? <em style={styles.overridden}>{t('overridden')}</em> : null}
-            <button type="button" disabled={disabled || !isOverridden} onClick={() => resetField(def)}>
-              {t('reset')}
+            <button type="button" disabled={saving || !drafts[field]} onClick={() => resetField(def)}>
+              {t.reset}
             </button>
           </label>
         )
@@ -247,16 +368,14 @@ export function LanGatewayCard({ scope, t }: LanGatewayCardProps) {
             <label style={styles.label} htmlFor={`lan-gw-${field}`}>{label}</label>
             <select
               id={`lan-gw-${field}`}
-              value={draft.text}
-              disabled={disabled}
-              onChange={(e: ChangeEvent<HTMLSelectElement>) =>
-                stage(field, { text: e.target.value, clear: false })}
+              value={text}
+              disabled={saving}
+              onChange={(e: ChangeEvent<HTMLSelectElement>) => stage(field, e.target.value)}
             >
               {def.options?.map(option => <option key={option} value={option}>{option}</option>)}
             </select>
-            {isOverridden ? <em style={styles.overridden}>{t('overridden')}</em> : null}
-            <button type="button" disabled={disabled || !isOverridden} onClick={() => resetField(def)}>
-              {t('reset')}
+            <button type="button" disabled={saving || !drafts[field]} onClick={() => resetField(def)}>
+              {t.reset}
             </button>
           </div>
         )
@@ -267,23 +386,18 @@ export function LanGatewayCard({ scope, t }: LanGatewayCardProps) {
             <input
               id={`lan-gw-${field}`}
               type={def.kind === 'number' ? 'number' : 'text'}
-              value={draft.text}
-              disabled={disabled}
-              placeholder={def.optional ? t('emptyMeansClear') : undefined}
-              onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                stage(field, { text: e.target.value, clear: false })}
+              value={text}
+              disabled={saving}
+              placeholder={def.optional ? t.emptyMeansClear : undefined}
+              onChange={(e: ChangeEvent<HTMLInputElement>) => stage(field, e.target.value)}
             />
-            {hint !== labelKey && hint !== '' ? <span style={styles.hint}>{hint}</span> : null}
-            <span style={styles.rowRight}>
-              {isOverridden ? <em style={styles.overridden}>{t('overridden')}</em> : null}
-              <button type="button" disabled={disabled || !isOverridden} onClick={() => resetField(def)}>
-                {t('reset')}
-              </button>
-            </span>
+            <span style={styles.hint}>{hint}</span>
           </div>
         )
     }
   }
+
+  const statusLine = `${route.running ? t.running : t.stopped} · ${t.tls}: ${route.tls} · :${route.port}`
 
   return (
     <li style={styles.card}>
@@ -294,26 +408,27 @@ export function LanGatewayCard({ scope, t }: LanGatewayCardProps) {
         onClick={() => { setOpen(!open) }}
       >
         <span style={styles.headerText}>
-          <span style={styles.name}>{t('title')}</span>
-          <span style={styles.description}>{t('description')}</span>
+          <span style={styles.name}>{t.title}</span>
+          <span style={styles.description}>{t.description}</span>
         </span>
-        {dirty ? <span style={styles.pending}>{t('unsaved')}</span> : null}
-        <span style={{ ...styles.chevron, ...(open ? styles.chevronOpen : {}) }}>{open ? '▾' : '▸'}</span>
+        <span style={styles.status}>{statusLine}</span>
+        {dirty ? <span style={styles.pending}>{t.unsaved}</span> : null}
+        <span style={styles.chevron}>{open ? '▾' : '▸'}</span>
       </button>
       {open
         ? (
           <div style={styles.body}>
-            {!writable ? <p style={styles.readOnly} role="status">{t('readOnly')}</p> : null}
+            {route.lastError ? <p style={styles.failed} role="status">{t.lastError}: {route.lastError}</p> : null}
             {FIELDS.map(def => <div key={def.field}>{renderControl(def)}</div>)}
             <div style={styles.footer}>
-              {failed ? <p style={styles.failed} role="status">{t('saveFailed')}</p> : null}
-              <button type="button" disabled={!dirty || saving} onClick={discard}>{t('discard')}</button>
+              {failed ? <p style={styles.failed} role="status">{failed}</p> : null}
+              <button type="button" disabled={!dirty || saving} onClick={discard}>{t.discard}</button>
               <button
                 type="button"
                 disabled={!dirty || invalid() || saving}
                 onClick={() => { void save() }}
               >
-                {saving ? t('saving') : t('save')}
+                {saving ? t.saving : t.save}
               </button>
             </div>
           </div>
@@ -350,20 +465,17 @@ const styles: Record<string, React.CSSProperties> = {
   headerText: { display: 'flex', flexDirection: 'column', gap: '2px', flex: 1, minWidth: 0 },
   name: { fontSize: '14px', fontWeight: 600, color: '#e6e9ef' },
   description: { fontSize: '12px', color: '#8b93a3' },
+  status: { fontSize: '11px', color: '#6b7488', whiteSpace: 'nowrap' },
   pending: {
     fontSize: '11px', color: '#f0c36d', border: '1px solid #f0c36d66',
     borderRadius: '999px', padding: '1px 8px', whiteSpace: 'nowrap',
   },
   chevron: { color: '#8b93a3', fontSize: '12px' },
-  chevronOpen: { transform: 'rotate(180deg)' },
   body: { padding: '12px 14px', borderTop: '1px solid #2a3040', display: 'flex', flexDirection: 'column', gap: '10px' },
   field: { display: 'flex', flexDirection: 'column', gap: '4px' },
   label: { fontSize: '12px', color: '#aab2c1' },
   hint: { fontSize: '11px', color: '#6b7488' },
   checkRow: { display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: '#e6e9ef' },
-  rowRight: { display: 'flex', alignItems: 'center', gap: '8px' },
-  overridden: { fontSize: '11px', color: '#f0c36d', fontStyle: 'normal' },
-  readOnly: { fontSize: '12px', color: '#8b93a3', margin: 0 },
   footer: { display: 'flex', justifyContent: 'flex-end', gap: '8px', alignItems: 'center', marginTop: '4px' },
   failed: { fontSize: '12px', color: '#ff7b72', margin: 0, marginRight: 'auto' },
 }
