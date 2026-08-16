@@ -274,7 +274,9 @@ export function generateSelfSignedCert(options: SelfSignedCertOptions): SelfSign
   const keyUsage = derSeq(
     derOid('2.5.29.15'),
     derBoolean(true), // critical
-    derOctetString(derBitString(Buffer.from([0x05]))), // digitalSignature + keyEncipherment
+    // KeyUsage is a BIT STRING with MSB-first bit numbering: bit 0 =
+    // digitalSignature, bit 2 = keyEncipherment → 1010 0000 = 0xa0.
+    derOctetString(derBitString(Buffer.from([0xa0]))),
   )
   const extendedKeyUsage = derSeq(
     derOid('2.5.29.37'),

@@ -43,6 +43,20 @@ describe('generateSelfSignedCert', () => {
     expect(() => generateSelfSignedCert({ hosts: [], days: 30 })).toThrow(/at least one host/)
   })
 
+  it('encodes KeyUsage as digitalSignature + keyEncipherment (MSB-first bits)', () => {
+    const { certDer } = generateSelfSignedCert({ hosts: ['localhost'], days: 1 })
+    // keyUsage OID 2.5.29.15 = 06 03 55 1d 0f, followed by critical BOOLEAN
+    // (01 01 ff) and an OCTET STRING wrapping BIT STRING 03 02 00 a0 —
+    // 0 unused bits, bits 0 (digitalSignature) and 2 (keyEncipherment) set.
+    const oid = Buffer.from('0603551d0f', 'hex')
+    const idx = certDer.indexOf(oid)
+    expect(idx).toBeGreaterThan(-1)
+    const after = certDer.subarray(idx + oid.length, idx + oid.length + 12).toString('hex')
+    expect(after).toContain('030200a0')
+    // And it must NOT contain the reversed encoding (keyCertSign | encipherOnly).
+    expect(after).not.toContain('03020005')
+  })
+
   it('serves a TLS handshake with the generated certificate', async () => {
     const { certPem, keyPem } = generateSelfSignedCert({ hosts: ['localhost'], days: 1 })
     const server = createServer({ cert: certPem, key: keyPem }, (_req: IncomingMessage, res: ServerResponse) => {
