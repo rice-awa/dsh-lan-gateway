@@ -189,6 +189,10 @@ IPv6 的 `fe80::/10`（link-local）与回环地址始终免密。
 非 LAN 来源打开 `http://<主机>:3081/` 时，先看到网关自带的登录表单（`/__login`），
 输入正确密码后签发会话 cookie 并跳回 `/`。
 
+<p align="center">
+  <img src="assets/login-screenshot.webp" alt="网关登录页截图" width="320" />
+</p>
+
 ## UUID shim 说明（v0.2.0 新增）
 
 **问题**：网关以 `http://<LAN-IP>:3081` 服务页面，浏览器视其为不安全源，
