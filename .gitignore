@@ -5,3 +5,6 @@ dist/
 *.tgz
 *.log
 .DS_Store
+
+# 源码图（assets/ 只提交压缩后的 webp）
+assets/*.png

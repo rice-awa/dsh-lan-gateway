@@ -1,4 +1,15 @@
-# dsh-lan-gateway — LAN / 公网网关插件
+<p align="center">
+  <img src="assets/banner.webp" alt="dsh-lan-gateway — 把 DeepSeek Harness 的 Web GUI 安全地开放到局域网 / 公网" />
+</p>
+
+<h1 align="center">dsh-lan-gateway — LAN / 公网网关插件</h1>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/DeepSeek%20Harness-4d6bfe?logo=deepseek&logoColor=fff&style=flat-square" alt="DeepSeek Harness" />
+  <img src="https://img.shields.io/badge/version-0.3.0-2b7fff?style=flat-square" alt="version 0.3.0" />
+  <img src="https://img.shields.io/badge/TLS-8b5cf6?logo=lock&logoColor=fff&style=flat-square" alt="TLS" />
+  <img src="https://img.shields.io/github/license/rice-awa/dsh-lan-gateway?style=flat-square" alt="MIT license" />
+</p>
 
 > 把 DeepSeek Harness 的 Web GUI 安全地开放到局域网 / 公网。
 > 附带**不安全源 UUID shim**：网关以纯 HTTP 局域网地址服务页面时，浏览器不提供
