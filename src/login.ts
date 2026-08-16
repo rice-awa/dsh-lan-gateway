@@ -6,7 +6,7 @@
  * @module @dsh-external/dsh-lan-gateway/login
  */
 
-import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http'
 
 /** Path the gateway owns and never forwards. */
 export const LOGIN_PATH = '/__login' as const
@@ -83,10 +83,11 @@ function escapeHtml(text: string): string {
 }
 
 /** Serve the GET login page. */
-export function serveLoginGet(res: ServerResponse): void {
+export function serveLoginGet(res: ServerResponse, extraHeaders: OutgoingHttpHeaders = {}): void {
   res.writeHead(200, {
     'content-type': 'text/html; charset=utf-8',
     'cache-control': 'no-store',
+    ...extraHeaders,
   })
   res.end(renderLoginPage())
 }

@@ -16,6 +16,7 @@
  */
 
 import http from 'node:http'
+import https from 'node:https'
 import type { Duplex } from 'node:stream'
 import {
   classifySource,
@@ -48,6 +49,8 @@ export interface GatewayConfig {
   cookieMaxAgeDays: number
   /** Cookie name. */
   cookieName: string
+  /** PEM cert/key material; when present the listener speaks HTTPS. */
+  tls?: { cert: string; key: string }
 }
 
 const DEFAULT_BODY_LIMIT_BYTES = 64 * 1024
@@ -67,9 +70,12 @@ export class LanGateway {
 
   constructor(private readonly config: GatewayConfig, state: GatewayState) {
     this.state = state
-    this.server = http.createServer((req, res) => {
+    const handle = (req: http.IncomingMessage, res: http.ServerResponse): void => {
       void this.handleHttp(req, res)
-    })
+    }
+    this.server = this.config.tls !== undefined
+      ? https.createServer({ cert: this.config.tls.cert, key: this.config.tls.key }, handle)
+      : http.createServer(handle)
     this.server.on('upgrade', (req, socket, head) => {
       void this.handleUpgrade(req, socket, head)
     })
@@ -133,14 +139,26 @@ export class LanGateway {
   private serveUnauthorized(res: http.ServerResponse, limited: boolean): void {
     res.writeHead(302, {
       location: `${LOGIN_PATH}${limited ? '?limited=1' : ''}`,
+      ...this.securityHeaders(),
     })
     res.end()
   }
 
   private serveLoginError(res: http.ServerResponse, message: string): void {
     const opts: LoginPageOptions = { error: message }
-    res.writeHead(401, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+    res.writeHead(401, {
+      'content-type': 'text/html; charset=utf-8',
+      'cache-control': 'no-store',
+      ...this.securityHeaders(),
+    })
     res.end(renderLoginPage(opts))
+  }
+
+  /** HSTS when the listener is HTTPS (never sent on plain HTTP). */
+  private securityHeaders(): http.OutgoingHttpHeaders {
+    return this.config.tls === undefined
+      ? {}
+      : { 'strict-transport-security': 'max-age=15552000' }
   }
 
   /** Handle one HTTP request: auth gate → CSRF fence → forward. */
@@ -164,7 +182,7 @@ export class LanGateway {
     // CSRF fence for /api before any rewriting (see module docs).
     if (pathname === '/api' || pathname.startsWith('/api/')) {
       if (!this.passesCsrfFence(req)) {
-        res.writeHead(403)
+        res.writeHead(403, this.securityHeaders())
         res.end('forbidden')
         return
       }
@@ -194,7 +212,7 @@ export class LanGateway {
   private handleLogin(req: http.IncomingMessage, res: http.ServerResponse): void {
     const limited = req.url?.includes('limited=1') ?? false
     if (req.method === 'GET' || req.method === 'HEAD') {
-      serveLoginGet(res)
+      serveLoginGet(res, this.securityHeaders())
       return
     }
     if (req.method !== 'POST') {
@@ -224,10 +242,12 @@ export class LanGateway {
       }
       const expiresMs = Date.now() + this.config.cookieMaxAgeDays * 86_400_000
       const cookie = signCookie(this.state.cookieSecret, expiresMs)
+      const secure = this.config.tls !== undefined ? '; Secure' : ''
       res.writeHead(302, {
         location: '/',
+        ...this.securityHeaders(),
         'set-cookie': [
-          `${this.config.cookieName}=${cookie}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${this.config.cookieMaxAgeDays * 86_400}`,
+          `${this.config.cookieName}=${cookie}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${this.config.cookieMaxAgeDays * 86_400}${secure}`,
         ],
       })
       res.end()

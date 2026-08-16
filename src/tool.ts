@@ -14,7 +14,7 @@ import type { GatewayController } from './index.ts'
 
 export const LAN_GATEWAY_TOOL_NAME = 'lan_gateway'
 
-type ToolCommand = 'status' | 'enable' | 'disable' | 'set-password' | 'rotate-secret'
+type ToolCommand = 'status' | 'enable' | 'disable' | 'set-password' | 'rotate-secret' | 'tls-regenerate'
 
 /**
  * Build the `lan_gateway` tool over a controller interface implemented by the
@@ -27,18 +27,20 @@ export function lanGatewayTool(control: GatewayController): ToolDefinition {
     description:
       'Manage the LAN/internet gateway for this DeepSeek Harness web GUI. '
       + '`status` shows whether the gateway is listening, on which port, toward which dsh port, '
-      + 'whether a password is set, and the trusted LAN CIDRs. `enable` starts listening on 0.0.0.0 '
-      + '(loopback and LAN sources need no password; anything else must sign in). '
-      + '`disable` stops listening. `set-password` sets (or, with an empty password, clears) the '
-      + 'gateway password for non-LAN access. `rotate-secret` invalidates every issued login cookie.',
+      + 'whether a password is set, the trusted LAN CIDRs, and the TLS state. `enable` starts '
+      + 'listening on 0.0.0.0 (loopback and LAN sources need no password; anything else must sign '
+      + 'in). `disable` stops listening. `set-password` sets (or, with an empty password, clears) '
+      + 'the gateway password for non-LAN access. `rotate-secret` invalidates every issued login '
+      + 'cookie. `tls-regenerate` mints a fresh self-signed certificate (tlsMode must be '
+      + 'self-signed) and restarts the listener.',
     parameters: {
       command: {
         type: 'string',
-        enum: ['status', 'enable', 'disable', 'set-password', 'rotate-secret'],
+        enum: ['status', 'enable', 'disable', 'set-password', 'rotate-secret', 'tls-regenerate'],
         description:
           '`status` (default) — report gateway state. `enable` / `disable` — start or stop the '
           + 'listener. `set-password` — set or clear the login password. `rotate-secret` — '
-          + 'invalidate all existing sessions.',
+          + 'invalidate all existing sessions. `tls-regenerate` — mint a new self-signed certificate.',
       },
       password: {
         type: 'string',
@@ -72,6 +74,8 @@ export function lanGatewayTool(control: GatewayController): ToolDefinition {
         }
         case 'rotate-secret':
           return control.rotateSecret()
+        case 'tls-regenerate':
+          return control.regenerateTls()
       }
     },
   })

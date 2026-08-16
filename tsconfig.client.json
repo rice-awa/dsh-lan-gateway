@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["es2022", "dom", "dom.iterable"],
+    "jsx": "react-jsx",
+    "types": ["react"]
+  },
+  "include": ["src/client", "tests/uuid-shim.test.ts"],
+  "exclude": []
+}

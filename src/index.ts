@@ -9,8 +9,17 @@
  * sources are proxied password-free; anything else must complete the login
  * page and present the HMAC cookie.
  *
+ * The gateway listener can speak TLS: either a persisted auto-generated
+ * self-signed certificate (`tlsMode: 'self-signed'`, hosts from
+ * `tlsSelfSignedHosts`) or a user-supplied PEM pair (`tlsMode: 'custom'`,
+ * `tlsCertPath` + `tlsKeyPath`).
+ *
+ * Every tunable is also exposed as the `lan-gateway` user-settings namespace
+ * (`ctx.settings`), so the official DSH Settings → Plugins page can adjust
+ * port, CIDRs, auth, and TLS live; the running listener restarts on change.
+ *
  * Disabled by default in the bundle patch (safe): the listener opens only
- * after `lan_gateway enable`.
+ * after `lan_gateway enable` or `enabled: true`.
  *
  * @module @dsh-external/dsh-lan-gateway
  */
@@ -18,6 +27,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { randomBytes } from 'node:crypto'
 import z from '@deepseek-ai/schemastery'
+import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { DEFAULT_LAN_CIDR_STRINGS } from './auth.ts'
 import { LanGateway } from './gateway.ts'
 import {
@@ -26,6 +36,14 @@ import {
   setPassword,
   type GatewayState,
 } from './state.ts'
+import {
+  describeCert,
+  loadCustomCert,
+  loadOrCreateSelfSigned,
+  parseSelfSignedHosts,
+  regenerateSelfSigned,
+  type TlsMaterial,
+} from './tls.ts'
 import { lanGatewayTool } from './tool.ts'
 
 /** Stable Cordis plugin name. */
@@ -58,6 +76,7 @@ export interface GatewayController {
   disable(): Promise<ToolResult>
   setPassword(password: string | undefined): ToolResult
   rotateSecret(): ToolResult
+  regenerateTls(): Promise<ToolResult>
 }
 
 /** Deployment configuration (composition-level; secrets live in state.json). */
@@ -76,7 +95,22 @@ export interface Config {
   cookieMaxAgeDays: number
   /** Cookie name. */
   cookieName: string
+  /** Whether the gateway listener speaks TLS. */
+  tlsEnabled: boolean
+  /** Certificate source: auto-generated self-signed, or user-supplied files. */
+  tlsMode: 'self-signed' | 'custom'
+  /** Custom mode: path to the PEM certificate (or chain). */
+  tlsCertPath?: string
+  /** Custom mode: path to the PEM private key. */
+  tlsKeyPath?: string
+  /** Self-signed mode: comma/space separated DNS names and IPs for the SANs. */
+  tlsSelfSignedHosts?: string
+  /** Self-signed certificate validity in days (default 825 ≈ 27 months). */
+  tlsCertMaxAgeDays: number
 }
+
+/** The `lan-gateway` user-settings namespace, mirroring the composition schema. */
+const NS = settingsNamespace('lan-gateway')
 
 /** Schemastery configuration validated by the Loader. */
 export const Config: z<Config> = z.object({
@@ -85,17 +119,80 @@ export const Config: z<Config> = z.object({
   dshTargetPort: z.natural().min(1).max(65535),
   lanCidrs: z.array(String).default([...DEFAULT_LAN_CIDR_STRINGS]),
   authRequired: z.boolean().default(true),
-  cookieMaxAgeDays: z.natural().min(1).max(365).default(7),
+  cookieMaxAgeDays: z.natural().min(1).max(365).default(30),
   cookieName: z.string().default('dsh_gw_auth'),
+  tlsEnabled: z.boolean().default(false),
+  tlsMode: z.union([z.const('self-signed'), z.const('custom')]).default('self-signed'),
+  tlsCertPath: z.string(),
+  tlsKeyPath: z.string(),
+  tlsSelfSignedHosts: z.string().default('localhost'),
+  tlsCertMaxAgeDays: z.natural().min(1).max(3650).default(825),
 })
+
+/** Resolve the TLS material for a config, or undefined when TLS is off. */
+function resolveTls(cfg: Config): TlsMaterial | undefined {
+  if (!cfg.tlsEnabled) return undefined
+  if (cfg.tlsMode === 'custom') {
+    return loadCustomCert(cfg.tlsCertPath ?? '', cfg.tlsKeyPath ?? '')
+  }
+  const hosts = parseSelfSignedHosts(cfg.tlsSelfSignedHosts)
+  if (hosts.length === 0) {
+    throw new Error('tlsSelfSignedHosts must name at least one host (DNS name or IP)')
+  }
+  const { material } = loadOrCreateSelfSigned({ hosts, days: cfg.tlsCertMaxAgeDays })
+  return material
+}
+
+/** Config fields that require a listener restart when they change. */
+function listenerKey(cfg: Config): string {
+  return JSON.stringify([
+    cfg.gatewayPort,
+    cfg.dshTargetPort,
+    cfg.lanCidrs,
+    cfg.authRequired,
+    cfg.cookieMaxAgeDays,
+    cfg.cookieName,
+    cfg.tlsEnabled,
+    cfg.tlsMode,
+    cfg.tlsCertPath,
+    cfg.tlsKeyPath,
+    cfg.tlsSelfSignedHosts,
+    cfg.tlsCertMaxAgeDays,
+  ])
+}
+
+/** One-line TLS description for status output. */
+function tlsStatusLine(cfg: Config): string {
+  if (!cfg.tlsEnabled) return 'off'
+  if (cfg.tlsMode === 'custom') {
+    return `custom (${cfg.tlsCertPath ?? '?'}, ${cfg.tlsKeyPath ?? '?'})`
+  }
+  try {
+    const hosts = parseSelfSignedHosts(cfg.tlsSelfSignedHosts)
+    const { material } = loadOrCreateSelfSigned({ hosts, days: cfg.tlsCertMaxAgeDays })
+    const info = describeCert(material.cert)
+    return `self-signed [${info.subject}] exp ${info.validTo}`
+  } catch (error) {
+    return `self-signed (unavailable: ${error instanceof Error ? error.message : String(error)})`
+  }
+}
 
 export function apply(ctx: Context, config: Config): void {
   let state = loadState()
   let gateway: LanGateway | undefined
+  let startedWith: string | undefined
+  let lastError: string | undefined
+  let manualOverride: boolean | undefined
+  /** The authoritative config: settings section when attached, else composition. */
+  let configSource: () => Config = () => config
+  /** Serializes listener start/stop/restart so settings changes cannot race. */
+  let syncing: Promise<void> = Promise.resolve()
 
-  const startGateway = async (): Promise<void> => {
+  const effective = (): Config => configSource()
+
+  const startGateway = async (cfg: Config): Promise<void> => {
     if (gateway !== undefined) return
-    if (config.authRequired && state.password === undefined) {
+    if (cfg.authRequired && state.password === undefined) {
       // A passwordless gateway exposed to non-LAN sources would be an open
       // remote-code-execution door. Refuse to listen until a password is set.
       throw new Error(
@@ -103,58 +200,97 @@ export function apply(ctx: Context, config: Config): void {
         + 'authRequired=false in the plugin config) before enabling.',
       )
     }
-    const dshPort = config.dshTargetPort ?? ctx.webServer.port
+    const dshPort = cfg.dshTargetPort ?? ctx.webServer.port
+    const tls = resolveTls(cfg)
     const next = new LanGateway({
-      gatewayPort: config.gatewayPort,
+      gatewayPort: cfg.gatewayPort,
       dshPort,
-      lanCidrs: config.lanCidrs,
-      authRequired: config.authRequired,
-      cookieMaxAgeDays: config.cookieMaxAgeDays,
-      cookieName: config.cookieName,
+      lanCidrs: cfg.lanCidrs,
+      authRequired: cfg.authRequired,
+      cookieMaxAgeDays: cfg.cookieMaxAgeDays,
+      cookieName: cfg.cookieName,
+      ...(tls !== undefined ? { tls } : {}),
     }, state)
     await next.listen()
     gateway = next
+    startedWith = listenerKey(cfg)
     ctx.logger.info(
-      `dsh-lan-gateway: listening on 0.0.0.0:${config.gatewayPort} -> 127.0.0.1:${dshPort}`,
+      `dsh-lan-gateway: listening on 0.0.0.0:${cfg.gatewayPort}${tls !== undefined ? ' (TLS)' : ''} -> 127.0.0.1:${dshPort}`,
     )
   }
 
   const stopGateway = async (): Promise<void> => {
     const current = gateway
     gateway = undefined
+    startedWith = undefined
     if (current !== undefined) {
       await current.close()
       ctx.logger.info('dsh-lan-gateway: stopped')
     }
   }
 
+  /** Reconcile the listener with the effective config (start/stop/restart). */
+  const syncGateway = (reason: string): Promise<void> => {
+    syncing = syncing.then(async () => {
+      lastError = undefined
+      const cfg = effective()
+      const shouldRun = manualOverride ?? cfg.enabled
+      try {
+        if (gateway === undefined) {
+          if (shouldRun) await startGateway(cfg)
+        } else if (!shouldRun) {
+          await stopGateway()
+        } else if (startedWith !== listenerKey(cfg)) {
+          await stopGateway()
+          await startGateway(cfg)
+        }
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error)
+        ctx.logger.warn(`dsh-lan-gateway: ${reason}: ${lastError}`)
+      }
+    })
+    return syncing
+  }
+
+  // The tunables also live in the `lan-gateway` settings section: while the
+  // settings service exists, the section (composition base + user overrides)
+  // is the authoritative config, and every committed change re-syncs the
+  // listener — so the Settings → Plugins page adjusts the gateway live.
+  installSettingsSection(ctx, NS, Config, config, {
+    setSource: (source) => { configSource = source },
+    onChange: () => { void syncGateway('settings change') },
+  })
+
   const controller: GatewayController = {
     status(): ToolResult {
-      const dshPort = config.dshTargetPort ?? ctx.webServer.port
+      const cfg = effective()
+      const dshPort = cfg.dshTargetPort ?? ctx.webServer.port
       return {
         ok: true,
         message:
-          `LAN gateway: ${gateway !== undefined ? `LISTENING on 0.0.0.0:${config.gatewayPort}` : 'stopped'}`
+          `LAN gateway: ${gateway !== undefined ? `LISTENING on 0.0.0.0:${cfg.gatewayPort}` : 'stopped'}`
           + `\n- dsh target: 127.0.0.1:${dshPort}`
           + `\n- password: ${state.password !== undefined ? 'set' : 'NOT SET'}`
-          + `\n- auth required for non-LAN: ${config.authRequired}`
-          + `\n- trusted LAN CIDRs: ${config.lanCidrs.join(', ') || '(none)'}`
-          + `\n- session cookie: ${config.cookieName}, ${config.cookieMaxAgeDays}d`,
+          + `\n- auth required for non-LAN: ${cfg.authRequired}`
+          + `\n- trusted LAN CIDRs: ${cfg.lanCidrs.join(', ') || '(none)'}`
+          + `\n- session cookie: ${cfg.cookieName}, ${cfg.cookieMaxAgeDays}d`
+          + `\n- TLS: ${tlsStatusLine(cfg)}`
+          + (manualOverride !== undefined
+            ? `\n- manual override: ${manualOverride ? 'enabled' : 'disabled'}`
+            : '')
+          + (lastError !== undefined ? `\n- last error: ${lastError}` : ''),
       }
     },
     async enable(): Promise<ToolResult> {
-      try {
-        await startGateway()
-        return { ok: true, message: `Gateway enabled: listening on 0.0.0.0:${config.gatewayPort}` }
-      } catch (err) {
-        return {
-          ok: false,
-          message: `Failed to enable gateway: ${err instanceof Error ? err.message : String(err)}`,
-        }
-      }
+      manualOverride = true
+      await syncGateway('tool enable')
+      return gateway !== undefined
+        ? { ok: true, message: `Gateway enabled: listening on 0.0.0.0:${effective().gatewayPort}` }
+        : { ok: false, message: `Failed to enable gateway: ${lastError ?? 'unknown error'}` }
     },
     async disable(): Promise<ToolResult> {
-      await stopGateway()
+      manualOverride = false
+      await syncGateway('tool disable')
       return { ok: true, message: 'Gateway disabled.' }
     },
     setPassword(password: string | undefined): ToolResult {
@@ -182,6 +318,30 @@ export function apply(ctx: Context, config: Config): void {
       gateway?.setState(state)
       return { ok: true, message: 'Session secret rotated. All existing login cookies are now invalid.' }
     },
+    async regenerateTls(): Promise<ToolResult> {
+      const cfg = effective()
+      if (!cfg.tlsEnabled || cfg.tlsMode !== 'self-signed') {
+        return { ok: false, message: 'TLS is off or in custom mode — nothing to regenerate. Enable tlsEnabled with tlsMode=self-signed first.' }
+      }
+      const hosts = parseSelfSignedHosts(cfg.tlsSelfSignedHosts)
+      if (hosts.length === 0) {
+        return { ok: false, message: 'tlsSelfSignedHosts must name at least one host (DNS name or IP).' }
+      }
+      try {
+        regenerateSelfSigned({ hosts, days: cfg.tlsCertMaxAgeDays })
+        if (gateway !== undefined) {
+          await stopGateway()
+          await startGateway(effective())
+          lastError = undefined
+        }
+        return { ok: true, message: 'Self-signed certificate regenerated (new key). Listener restarted with the new certificate.' }
+      } catch (error) {
+        return {
+          ok: false,
+          message: `Failed to regenerate TLS certificate: ${error instanceof Error ? error.message : String(error)}`,
+        }
+      }
+    },
   }
 
   // Register the management tool once.
@@ -189,14 +349,7 @@ export function apply(ctx: Context, config: Config): void {
 
   // Own the gateway lifecycle with the cordis tree.
   ctx.effect(async () => {
-    if (config.enabled) {
-      try {
-        await startGateway()
-      } catch (err) {
-        // A configured-but-unstartable gateway fails loud at boot.
-        ctx.logger.warn(`dsh-lan-gateway: ${err instanceof Error ? err.message : String(err)}`)
-      }
-    }
+    await syncGateway('boot')
     return stopGateway
   }, 'dsh-lan-gateway: listener lifecycle')
 }

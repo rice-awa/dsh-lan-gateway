@@ -13,5 +13,6 @@
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "include": ["src", "tests", "tsdown.config.ts"]
+  "include": ["src", "tests", "tsdown.config.ts"],
+  "exclude": ["src/client", "tests/uuid-shim.test.ts"]
 }

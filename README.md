@@ -4,6 +4,8 @@
 > 附带**不安全源 UUID shim**：网关以纯 HTTP 局域网地址服务页面时，浏览器不提供
 > `crypto.randomUUID`，本插件的 client bundle 会在页面加载早期自动补上
 > `getRandomValues` 版实现，让工作区（含其他设备打开的工作区）在网关下正常打开。
+> 附带**TLS 支持**：可用自动生成并持久化的**自签名证书**，或挂载**自己申请/签发的
+> PEM 证书**，让网关以 HTTPS 服务（浏览器不再提示不安全）。
 
 `dsh` 的 web CLI 会硬拒绝 `--host 0.0.0.0`（避免把远程代码执行暴露到网络），所以本插件
 让 dsh 继续只绑 `127.0.0.1`，自己另起一个 `0.0.0.0` 反向代理网关转发到 loopback 端口，
@@ -12,8 +14,12 @@
 
 ## 特性
 
-- **双端一体**：host 端是反向代理网关（登录 / HMAC cookie / 信任围栏）；client 端是
-  不安全源 UUID shim（LAN 纯 HTTP 页面下 `crypto.randomUUID` 缺失的运行时修复）。
+- **双端一体**：host 端是反向代理网关（登录 / HMAC cookie / 信任围栏 / TLS）；client 端是
+  不安全源 UUID shim + **官方设置页卡片**（DSH Settings → Plugins → 可配置插件，网关的
+  端口 / 网段 / 认证 / TLS 全部可视化调整，保存即热生效）。
+- **TLS 双模式**：`self-signed` 自动生成自签名证书（首次启动生成并持久化到
+  `~/.dsh/lan-gateway/tls/`，重启复用；`lan_gateway tls-regenerate` 可换新证书），或
+  `custom` 直接挂载你自己的 PEM 证书与私钥（如 Let's Encrypt / 自建 CA 签发）。
 - **默认关闭（安全）**：bundle patch 里 `enabled: false`，只有运行 `lan_gateway enable`
   后才监听网络端口。
 - **密钥不进配置**：密码哈希、cookie secret 存 `~/.dsh/lan-gateway/state.json`。
@@ -71,6 +77,9 @@ lan_gateway status
 # 设置非 LAN 访问密码（≥8 位）
 lan_gateway set-password
 
+# 换发自签名 TLS 证书（tlsMode=self-signed 时；换新密钥并热重启监听器）
+lan_gateway tls-regenerate
+
 # 关闭
 lan_gateway disable
 ```
@@ -80,17 +89,56 @@ lan_gateway disable
 > 参数传入、不会回显）、“查看网关状态”、“开启 / 关闭网关”。在对话中设置密码时请直接
 > 把密码说给模型，它不会把密码写进任何配置文件。
 
-## 配置项（bundle patch / `--patch` 覆盖）
+## 配置项（bundle patch / `--patch` 覆盖，或官方设置页）
+
+所有可调项都同时暴露为 `lan-gateway` 用户设置命名空间：打开 **DSH 的 Settings → Plugins
+→ 可配置插件**，展开「LAN 网关」卡片即可修改，保存即生效（监听器会按新配置自动重启）。
+下表即卡片字段 / 配置键：
 
 | 键 | 默认值 | 说明 |
 | --- | --- | --- |
 | `enabled` | `false` | 是否在启动时监听网络端口 |
 | `gatewayPort` | `3081` | 网关监听端口（`0.0.0.0`） |
 | `dshTargetPort` | 跟随 `ctx.webServer.port` | 转发到的 dsh loopback 端口 |
-| `lanCidrs` | RFC1918 + link-local（见下） | 免密的受信 LAN 网段 |
+| `lanCidrs` | RFC1918 + link-local（见下） | 免密的受信 LAN 网段（逗号分隔） |
 | `authRequired` | `true` | 非 LAN 来源是否需要登录 |
-| `cookieMaxAgeDays` | `7` | 会话 cookie 有效期（天） |
-| `cookieName` | `dsh_gw_auth` | 会话 cookie 名 |
+| `cookieMaxAgeDays` | `30` | 会话 cookie 有效期（天） |
+| `cookieName` | `dsh_gw_auth` | 会话 cookie 名（不进卡片） |
+| `tlsEnabled` | `false` | 是否以 HTTPS（TLS）提供服务 |
+| `tlsMode` | `self-signed` | 证书来源：`self-signed` 自动生成 / `custom` 用自己的证书 |
+| `tlsSelfSignedHosts` | `localhost` | 自签名证书的 SAN（逗号分隔的域名 / IP） |
+| `tlsCertPath` | — | `custom` 模式：PEM 证书（或证书链）绝对路径 |
+| `tlsKeyPath` | — | `custom` 模式：PEM 私钥绝对路径 |
+| `tlsCertMaxAgeDays` | `825` | 自签名证书有效期（天） |
+
+自签名证书在**首次启用 TLS 时生成一次**，持久化于 `~/.dsh/lan-gateway/tls/`
+（`selfsigned.crt` / `selfsigned.key`，0600），之后重启复用同一张证书；
+`lan_gateway tls-regenerate` 可随时换发新证书（新密钥）并热重启监听器。
+配置示例（`--patch`）：
+
+```yaml
+- id: dsh-lan-gateway
+  config:
+    enabled: true
+    gatewayPort: 8443
+    tlsEnabled: true
+    tlsMode: self-signed
+    tlsSelfSignedHosts: localhost, 192.168.1.5
+```
+
+或用自己的证书（例如 `/etc/letsencrypt/live/example.com/` 下签发的 PEM）：
+
+```yaml
+- id: dsh-lan-gateway
+  config:
+    tlsEnabled: true
+    tlsMode: custom
+    tlsCertPath: /etc/letsencrypt/live/example.com/fullchain.pem
+    tlsKeyPath: /etc/letsencrypt/live/example.com/privkey.pem
+```
+
+启用 TLS 后访问 `https://<主机>:<端口>/`；登录 cookie 自动带 `Secure`，网关自身响应
+（登录页 / 重定向 / 拒绝）带 HSTS。自签名证书首次访问会看到浏览器警告，属预期行为。
 
 默认 `lanCidrs`：`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`、`169.254.0.0/16`，
 IPv6 的 `fe80::/10`（link-local）与回环地址始终免密。
@@ -105,6 +153,9 @@ IPv6 的 `fe80::/10`（link-local）与回环地址始终免密。
   登录尝试按来源限流（5 次 / 分钟）。
 - **会话 cookie**：`payload.signature` 结构（HMAC-SHA256），`HttpOnly; SameSite=Lax`，
   过期后（`cookieMaxAgeDays`）即失效；`lan_gateway rotate-secret` 可作废全部会话。
+  启用 TLS 后自动附加 `Secure`。
+- **TLS**：监听器为 HTTPS 时，登录成功签发 `Secure` cookie，网关自身响应带 HSTS
+  （`max-age=15552000`）；转发到 dsh 的 loopback 连接仍为明文 HTTP（不出本机）。
 - **CSRF 围栏**：因为网关把 Origin 改写回 loopback、会蒙蔽 dsh 自身的 CSRF 防线，网关在
   转发前会对 `/api*` 请求自检 `sec-fetch-site` 与 Origin 是否匹配网关的权威来源，
   跨站请求直接 403。
@@ -136,6 +187,8 @@ IPv6 的 `fe80::/10`（link-local）与回环地址始终免密。
 pnpm test
 # ✓ tests/gateway.test.ts   (23) 网关代理 / 登录 / HMAC / 信任围栏
 # ✓ tests/uuid-shim.test.ts ( 3) 不安全源补丁 / 安全源 no-op / v4 正确性
+# ✓ tests/x509.test.ts      ( 4) 自签名证书 DER/SAN/签名/TLS 握手
+# ✓ tests/tls.test.ts       ( 6) 证书持久化 / 重生成 / 自定义证书加载
 ```
 
 ## 许可
