@@ -348,19 +348,27 @@ export function LanGatewayCard(_props: LanGatewayCardProps): ReactNode {
     switch (def.kind) {
       case 'boolean':
         return (
-          <label style={styles.checkRow}>
-            <input
-              type="checkbox"
-              checked={text === 'true'}
-              disabled={saving}
-              onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                stage(field, e.target.checked ? 'true' : 'false')}
-            />
-            <span>{label}</span>
-            <button type="button" disabled={saving || !drafts[field]} onClick={() => resetField(def)}>
-              {t.reset}
-            </button>
-          </label>
+          <div style={styles.field}>
+            <label style={styles.checkRow}>
+              <input
+                type="checkbox"
+                checked={text === 'true'}
+                disabled={saving}
+                onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                  stage(field, e.target.checked ? 'true' : 'false')}
+              />
+              <span style={styles.label}>{label}</span>
+              <button
+                type="button"
+                style={styles.reset}
+                disabled={saving || !drafts[field]}
+                onClick={() => resetField(def)}
+              >
+                {t.reset}
+              </button>
+            </label>
+            <span style={styles.hint}>{hint}</span>
+          </div>
         )
       case 'select':
         return (
@@ -368,13 +376,20 @@ export function LanGatewayCard(_props: LanGatewayCardProps): ReactNode {
             <label style={styles.label} htmlFor={`lan-gw-${field}`}>{label}</label>
             <select
               id={`lan-gw-${field}`}
+              style={styles.input}
               value={text}
               disabled={saving}
               onChange={(e: ChangeEvent<HTMLSelectElement>) => stage(field, e.target.value)}
             >
               {def.options?.map(option => <option key={option} value={option}>{option}</option>)}
             </select>
-            <button type="button" disabled={saving || !drafts[field]} onClick={() => resetField(def)}>
+            <span style={styles.hint}>{hint}</span>
+            <button
+              type="button"
+              style={styles.reset}
+              disabled={saving || !drafts[field]}
+              onClick={() => resetField(def)}
+            >
               {t.reset}
             </button>
           </div>
@@ -385,6 +400,7 @@ export function LanGatewayCard(_props: LanGatewayCardProps): ReactNode {
             <label style={styles.label} htmlFor={`lan-gw-${field}`}>{label}</label>
             <input
               id={`lan-gw-${field}`}
+              style={styles.input}
               type={def.kind === 'number' ? 'number' : 'text'}
               value={text}
               disabled={saving}
@@ -400,31 +416,39 @@ export function LanGatewayCard(_props: LanGatewayCardProps): ReactNode {
   const statusLine = `${route.running ? t.running : t.stopped} · ${t.tls}: ${route.tls} · :${route.port}`
 
   return (
-    <li style={styles.card}>
+    <li style={open ? { ...styles.card, ...styles.cardOpen } : styles.card}>
       <button
         type="button"
         style={styles.header}
         aria-expanded={open}
         onClick={() => { setOpen(!open) }}
       >
-        <span style={styles.headerText}>
+        <span style={styles.headText}>
           <span style={styles.name}>{t.title}</span>
           <span style={styles.description}>{t.description}</span>
         </span>
         <span style={styles.status}>{statusLine}</span>
         {dirty ? <span style={styles.pending}>{t.unsaved}</span> : null}
-        <span style={styles.chevron}>{open ? '▾' : '▸'}</span>
+        <span style={open ? { ...styles.chevron, ...styles.chevronOpen } : styles.chevron}>{open ? '▾' : '▸'}</span>
       </button>
       {open
         ? (
           <div style={styles.body}>
-            {route.lastError ? <p style={styles.failed} role="status">{t.lastError}: {route.lastError}</p> : null}
+            {route.lastError ? <p style={styles.error} role="status">{t.lastError}: {route.lastError}</p> : null}
             {FIELDS.map(def => <div key={def.field}>{renderControl(def)}</div>)}
             <div style={styles.footer}>
-              {failed ? <p style={styles.failed} role="status">{failed}</p> : null}
-              <button type="button" disabled={!dirty || saving} onClick={discard}>{t.discard}</button>
+              {failed ? <p style={styles.error} role="status">{failed}</p> : null}
               <button
                 type="button"
+                style={styles.discard}
+                disabled={!dirty || saving}
+                onClick={discard}
+              >
+                {t.discard}
+              </button>
+              <button
+                type="button"
+                style={styles.save}
                 disabled={!dirty || invalid() || saving}
                 onClick={() => { void save() }}
               >
@@ -439,43 +463,141 @@ export function LanGatewayCard(_props: LanGatewayCardProps): ReactNode {
 }
 
 /* ------------------------------------------------------------------ */
-/* Styling (inline — no CSS modules in this bundle)                    */
+/* Styling — the official DSH theme tokens (light/dark aware), with    */
+/* neutral fallbacks so the card never renders black-on-black or       */
+/* white-on-white even if a token is missing.                          */
 /* ------------------------------------------------------------------ */
+
+/** Theme token with a fallback for token-less environments. */
+function tk(token: string, fallback: string): string {
+  return `var(${token}, ${fallback})`
+}
+
+const L = {
+  border: tk('--dsw-alias-border-l2', 'rgba(127,127,127,0.35)'),
+  bg: tk('--dsw-alias-bg-layer-3', 'transparent'),
+  bgOpen: tk('--dsw-alias-bg-layer-2', 'transparent'),
+  labelPrimary: tk('--dsw-alias-label-primary', 'inherit'),
+  labelSecondary: tk('--dsw-alias-label-secondary', 'inherit'),
+  labelTertiary: tk('--dsw-alias-label-tertiary', 'rgba(127,127,127,0.8)'),
+  labelDimmed: tk('--dsw-alias-label-dimmed', 'rgba(127,127,127,0.6)'),
+  error: tk('--dsw-alias-label-error', '#d1242f'),
+  brand: tk('--dsw-alias-brand-primary', '#4f6ef7'),
+  badgeBg: tk('--dsw-alias-bg-module-platform', 'rgba(127,127,127,0.14)'),
+}
 
 const styles: Record<string, React.CSSProperties> = {
   card: {
     listStyle: 'none',
-    border: '1px solid #2a3040',
-    borderRadius: '10px',
-    background: '#141821',
+    border: `1px solid ${L.border}`,
+    borderRadius: '12px',
+    background: L.bg,
+    transition: 'border-color .16s, background .16s',
     overflow: 'hidden',
+  },
+  cardOpen: {
+    background: L.bgOpen,
+    borderColor: L.labelDimmed,
   },
   header: {
     display: 'flex',
     alignItems: 'center',
-    gap: '8px',
+    gap: '12px',
     width: '100%',
-    padding: '12px 14px',
+    padding: '14px 16px',
     border: 0,
-    background: 'transparent',
+    background: 'none',
+    font: 'inherit',
     color: 'inherit',
-    cursor: 'pointer',
     textAlign: 'left',
+    cursor: 'pointer',
   },
-  headerText: { display: 'flex', flexDirection: 'column', gap: '2px', flex: 1, minWidth: 0 },
-  name: { fontSize: '14px', fontWeight: 600, color: '#e6e9ef' },
-  description: { fontSize: '12px', color: '#8b93a3' },
-  status: { fontSize: '11px', color: '#6b7488', whiteSpace: 'nowrap' },
+  headText: { display: 'flex', flexDirection: 'column', gap: '4px', flex: 1, minWidth: 0 },
+  name: { fontSize: '15px', fontWeight: 600, lineHeight: 1.4, color: L.labelPrimary },
+  description: { fontSize: '13px', lineHeight: 1.5, color: L.labelTertiary },
+  status: { fontSize: '11px', color: L.labelTertiary, whiteSpace: 'nowrap' },
   pending: {
-    fontSize: '11px', color: '#f0c36d', border: '1px solid #f0c36d66',
-    borderRadius: '999px', padding: '1px 8px', whiteSpace: 'nowrap',
+    flex: 'none',
+    borderRadius: '999px',
+    padding: '1px 8px',
+    fontSize: '11px',
+    lineHeight: '17px',
+    fontWeight: 500,
+    whiteSpace: 'nowrap',
+    background: L.badgeBg,
+    color: L.labelSecondary,
   },
-  chevron: { color: '#8b93a3', fontSize: '12px' },
-  body: { padding: '12px 14px', borderTop: '1px solid #2a3040', display: 'flex', flexDirection: 'column', gap: '10px' },
-  field: { display: 'flex', flexDirection: 'column', gap: '4px' },
-  label: { fontSize: '12px', color: '#aab2c1' },
-  hint: { fontSize: '11px', color: '#6b7488' },
-  checkRow: { display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: '#e6e9ef' },
-  footer: { display: 'flex', justifyContent: 'flex-end', gap: '8px', alignItems: 'center', marginTop: '4px' },
-  failed: { fontSize: '12px', color: '#ff7b72', margin: 0, marginRight: 'auto' },
+  chevron: { flex: 'none', color: L.labelTertiary, fontSize: '12px', transition: 'transform .16s' },
+  chevronOpen: { transform: 'rotate(180deg)' },
+  body: {
+    borderTop: `1px solid ${L.border}`,
+    margin: '0 16px',
+    paddingBottom: '8px',
+    display: 'flex',
+    flexDirection: 'column',
+  },
+  field: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '6px',
+    padding: '12px 0',
+  },
+  label: { fontSize: '13px', fontWeight: 500, lineHeight: 1.5, color: L.labelPrimary },
+  hint: { margin: 0, fontSize: '12px', lineHeight: 1.5, color: L.labelTertiary },
+  checkRow: { display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' },
+  reset: {
+    border: 'none',
+    background: 'none',
+    padding: 0,
+    font: 'inherit',
+    fontSize: '12px',
+    lineHeight: 1.5,
+    color: L.labelSecondary,
+    cursor: 'pointer',
+    alignSelf: 'flex-start',
+  },
+  input: {
+    height: '34px',
+    padding: '0 12px',
+    border: `1px solid ${L.border}`,
+    borderRadius: '8px',
+    background: L.bg,
+    font: 'inherit',
+    fontSize: '13px',
+    lineHeight: 1.5,
+    color: L.labelPrimary,
+  },
+  footer: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: '8px',
+    padding: '12px 0 4px',
+    borderTop: `1px solid ${L.border}`,
+  },
+  error: { flex: 1, minWidth: 0, margin: 0, fontSize: '12px', lineHeight: 1.5, color: L.error },
+  discard: {
+    appearance: 'none',
+    border: `1px solid ${L.border}`,
+    borderRadius: '8px',
+    padding: '5px 14px',
+    font: 'inherit',
+    fontSize: '13px',
+    lineHeight: 1.5,
+    background: 'none',
+    color: L.labelSecondary,
+    cursor: 'pointer',
+  },
+  save: {
+    appearance: 'none',
+    border: '1px solid transparent',
+    borderRadius: '8px',
+    padding: '5px 14px',
+    font: 'inherit',
+    fontSize: '13px',
+    lineHeight: 1.5,
+    background: L.labelPrimary,
+    color: L.bg,
+    cursor: 'pointer',
+  },
 }
