@@ -19,18 +19,26 @@
 - **密钥不进配置**：密码哈希、cookie secret 存 `~/.dsh/lan-gateway/state.json`。
 
 ## 快速安装（推荐）
-请把下面这段话发送给你的agent：
-> 帮我从`https://github.com/rice-awa/dsh-lan-gateway`，安装这个dsh插件，遵循`https://github.com/rice-awa/dsh-lan-gateway/blob/main/INSTALL.md`
+
+请把下面这段话发送给你的 agent：
+
+> 帮我从 `https://github.com/rice-awa/dsh-lan-gateway` 安装这个 dsh 插件，遵循
+> `https://github.com/rice-awa/dsh-lan-gateway/blob/main/INSTALL.md`
 
 ## 手动安装
 
-### 方式 A：使用官方cli安装
+### 方式 A：使用官方 CLI 安装
 
 ```bash
 # 官方装配（重启后由 bundles 列表接管，生产态）
 dsh plugin --profile web add github:rice-awa/dsh-lan-gateway
-
 ```
+
+> **注意**：`dsh plugin ... add` 把剩余参数转发给 profile 目录里的 pnpm。安装本插件时
+> pnpm 会要求先在其构建脚本白名单（`allowBuilds`）中批准本包，否则报
+> `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`。把报错提示中的条目（或 `pnpm approve-builds`
+> 的选项）写进 `~/.dsh/profiles/web/pnpm-workspace.yaml` 再重试即可。完整步骤见
+> [INSTALL.md](INSTALL.md#方式-a使用官方-cli-安装)。
 
 ### 方式 B：从源码构建
 
@@ -58,6 +66,48 @@ lan_gateway set-password
 # 关闭
 lan_gateway disable
 ```
+
+> `lan_gateway` 是一个模型可调用的工具，上面的命令不必由你手动敲——**直接在 dsh 对话
+> 里说即可**，例如“设置网关密码为 ……”（模型会调用 `lan_gateway set-password`，密码以
+> 参数传入、不会回显）、“查看网关状态”、“开启 / 关闭网关”。在对话中设置密码时请直接
+> 把密码说给模型，它不会把密码写进任何配置文件。
+
+## 配置项（bundle patch / `--patch` 覆盖）
+
+| 键 | 默认值 | 说明 |
+| --- | --- | --- |
+| `enabled` | `false` | 是否在启动时监听网络端口 |
+| `gatewayPort` | `3081` | 网关监听端口（`0.0.0.0`） |
+| `dshTargetPort` | 跟随 `ctx.webServer.port` | 转发到的 dsh loopback 端口 |
+| `lanCidrs` | RFC1918 + link-local（见下） | 免密的受信 LAN 网段 |
+| `authRequired` | `true` | 非 LAN 来源是否需要登录 |
+| `cookieMaxAgeDays` | `30` | 会话 cookie 有效期（天） |
+| `cookieName` | `dsh_gw_auth` | 会话 cookie 名 |
+
+默认 `lanCidrs`：`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`、`169.254.0.0/16`，
+IPv6 的 `fe80::/10`（link-local）与回环地址始终免密。
+
+## 安全模型
+
+- **来源分级**：仅依据 `socket.remoteAddress`（IPv4-mapped IPv6 会先解包）把请求分为
+  loopback / lan / internet 三档，绝不信任 `X-Forwarded-For`。
+- **免密**：LAN 与 loopback 来源直接代理；`internet` 来源（`authRequired: true` 时）
+  必须携带有效 HMAC 会话 cookie，否则 302 到 `/__login` 登录页。
+- **登录页**：`/__login` 由网关独占、不转发；密码以 scrypt（每写一次重新加盐）校验，
+  登录尝试按来源限流（5 次 / 分钟）。
+- **会话 cookie**：`payload.signature` 结构（HMAC-SHA256），`HttpOnly; SameSite=Lax`，
+  过期后（`cookieMaxAgeDays`）即失效；`lan_gateway rotate-secret` 可作废全部会话。
+- **CSRF 围栏**：因为网关把 Origin 改写回 loopback、会蒙蔽 dsh 自身的 CSRF 防线，网关在
+  转发前会对 `/api*` 请求自检 `sec-fetch-site` 与 Origin 是否匹配网关的权威来源，
+  跨站请求直接 403。
+- **密码未设置时拒启**：`authRequired: true` 且未设密码时，`enable` 会拒绝监听——避免
+  把远程代码执行的门户开放给非 LAN 来源。
+- **WebSocket**：`/api` 升级请求同样过登录校验，再原样拼接转发给 dsh。
+
+## 登录页截图（预期）
+
+非 LAN 来源打开 `http://<主机>:3081/` 时，先看到网关自带的登录表单（`/__login`），
+输入正确密码后签发会话 cookie 并跳回 `/`。
 
 ## UUID shim 说明（v0.2.0 新增）
 
