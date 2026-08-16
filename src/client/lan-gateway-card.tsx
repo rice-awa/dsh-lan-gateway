@@ -110,7 +110,7 @@ const LABELS: Record<'zh' | 'en', Labels> = {
     'field.cookieMaxAgeDays': '会话有效期（天）',
     'hint.cookieMaxAgeDays': '登录 cookie 的存活天数（默认 7）',
     'field.tlsEnabled': '启用 TLS（HTTPS）',
-    'hint.tlsEnabled': '以 HTTPS 提供网关服务，浏览器不再提示不安全',
+    'hint.tlsEnabled': '以 HTTPS 提供网关服务',
     'field.tlsMode': '证书来源',
     'hint.tlsMode': 'self-signed = 自动生成自签名证书；custom = 使用自己的证书',
     'field.tlsSelfSignedHosts': '自签名证书域名/IP',
