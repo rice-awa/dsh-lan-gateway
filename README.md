@@ -89,7 +89,7 @@ lan_gateway disable
 | `dshTargetPort` | 跟随 `ctx.webServer.port` | 转发到的 dsh loopback 端口 |
 | `lanCidrs` | RFC1918 + link-local（见下） | 免密的受信 LAN 网段 |
 | `authRequired` | `true` | 非 LAN 来源是否需要登录 |
-| `cookieMaxAgeDays` | `30` | 会话 cookie 有效期（天） |
+| `cookieMaxAgeDays` | `7` | 会话 cookie 有效期（天） |
 | `cookieName` | `dsh_gw_auth` | 会话 cookie 名 |
 
 默认 `lanCidrs`：`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`、`169.254.0.0/16`，

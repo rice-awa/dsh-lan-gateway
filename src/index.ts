@@ -85,7 +85,7 @@ export const Config: z<Config> = z.object({
   dshTargetPort: z.natural().min(1).max(65535),
   lanCidrs: z.array(String).default([...DEFAULT_LAN_CIDR_STRINGS]),
   authRequired: z.boolean().default(true),
-  cookieMaxAgeDays: z.natural().min(1).max(365).default(30),
+  cookieMaxAgeDays: z.natural().min(1).max(365).default(7),
   cookieName: z.string().default('dsh_gw_auth'),
 })
 
