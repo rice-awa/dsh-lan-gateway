@@ -25,6 +25,14 @@
 > 帮我从 `https://github.com/rice-awa/dsh-lan-gateway` 安装这个 dsh 插件，遵循
 > `https://github.com/rice-awa/dsh-lan-gateway/blob/main/INSTALL.md`
 
+## 配套 skill
+
+仓库还带一个 [lan-gateway](skills/lan-gateway.md) 技能：让 dsh 的 agent 在对话中
+自动管理网关——开/关监听、设置或更换远程访问密码、轮换会话密钥、查看状态。装上后
+直接说「设置网关密码为 …」「开启远程访问」即可，agent 会调用 `lan_gateway` 工具
+完成（密码以参数传入，不写入配置、不回显）。安装方式见
+[INSTALL.md](INSTALL.md#安装配套-skill)。
+
 ## 手动安装
 
 ### 方式 A：使用官方 CLI 安装

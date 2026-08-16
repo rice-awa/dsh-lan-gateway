@@ -1,7 +1,7 @@
 # dsh-lan-gateway 安装指南
 
-本插件把 DeepSeek Harness 的 Web GUI 安全地开放到局域网 / 公网。功能与用法见
-[README](README.md)，本文件只讲安装。
+本插件把 DeepSeek Harness 的 Web GUI 安全地开放到局域网 / 公网，并附赠一个管理用
+skill。功能与用法见 [README](README.md)，本文件只讲安装。
 
 ## 前提
 
@@ -84,6 +84,33 @@ pnpm test           # 26 项测试
 cd ~/.dsh/profiles/web
 pnpm add "link:/path/to/dsh-lan-gateway"
 ```
+
+## 安装配套 skill（可选但推荐）
+
+仓库里的 [skills/lan-gateway.md](skills/lan-gateway.md) 是一个 dsh 技能：让 agent
+在对话中直接管理网关（开/关、设密码、轮换密钥、查状态）。插件本体装好后，把它
+复制到任一 skill 发现根即可（有 watcher，放进去即生效，无需重启）：
+
+```bash
+# 用户级（推荐，对所有项目生效）：$DSH_HOME/skills/
+mkdir -p ~/.dsh/skills
+
+# 从已安装的包拷贝（git / npm 安装的用户，包里已带 skills/）
+cp ~/.dsh/profiles/web/node_modules/@dsh-external/dsh-lan-gateway/skills/lan-gateway.md \
+   ~/.dsh/skills/
+
+# 或从源码仓库拷贝（开发用户）
+# cp <仓库路径>/skills/lan-gateway.md ~/.dsh/skills/
+
+# 其他发现根（按需）：${DSH_AGENTS_HOME:-~/.agents}/skills/、<项目根>/.agents/skills/
+```
+
+装好后在对话里说「设置网关密码为 …」「开启远程访问」「网关状态」即可，agent 会
+自动调用 `lan_gateway` 工具完成。
+
+> dsh 官方对 skill 的要求（已核实）：frontmatter 需含 `name` 与 `description`
+> （本技能均已提供）；`user-invocable` 默认即可用。旧式驼峰键（如
+> `userInvocable`）会被拒绝，必须以 kebab-case 编写。
 
 ## 安装后验证
 
