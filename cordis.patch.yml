@@ -1,0 +1,10 @@
+# dsh-lan-gateway bundle patch: inserts the gateway plugin into a profile's layer stack.
+# Disabled by default (safe): the gateway only opens a network port once `lan_gateway
+# enable` is run through the tool. Composition-level settings live here; secrets
+# (password hash, cookie secret) live in ~/.dsh/lan-gateway/state.json, never in config.
+- insert:
+    - id: dsh-lan-gateway
+      name: '@dsh-external/dsh-lan-gateway'
+      config:
+        enabled: false
+        gatewayPort: 3081
