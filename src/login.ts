@@ -3,7 +3,7 @@
  * `/__login` (never proxied) and the form-post handler that validates the
  * password and issues the session cookie.
  *
- * @module @dsh-external/dsh-lan-gateway/login
+ * @module @rice-awa/dsh-lan-gateway/login
  */
 
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http'

@@ -12,7 +12,7 @@
  *   BEFORE rewriting (reject `sec-fetch-site: cross-site` and any Origin that
  *   does not match the gateway authority the browser actually used).
  *
- * @module @dsh-external/dsh-lan-gateway/gateway
+ * @module @rice-awa/dsh-lan-gateway/gateway
  */
 
 import http from 'node:http'

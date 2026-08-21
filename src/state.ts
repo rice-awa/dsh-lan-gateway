@@ -4,7 +4,7 @@
  * NOT in the schemastery Config — secrets must never surface in
  * `--dump-config` output. Writes are atomic (temp file + rename).
  *
- * @module @dsh-external/dsh-lan-gateway/state
+ * @module @rice-awa/dsh-lan-gateway/state
  */
 
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'

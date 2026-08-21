@@ -6,7 +6,7 @@
  * (CA:FALSE) carrying the requested DNS/IP SANs, so browsers accept it for
  * `https://<host>:<port>` after the user approves the self-signed warning.
  *
- * @module @dsh-external/dsh-lan-gateway/x509
+ * @module @rice-awa/dsh-lan-gateway/x509
  */
 
 import {

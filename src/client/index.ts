@@ -1,5 +1,5 @@
 /**
- * @dsh-external/dsh-lan-gateway — browser half.
+ * @rice-awa/dsh-lan-gateway — browser half.
  *
  * Two jobs:
  * 1. Insecure-origin UUID shim: the gateway can serve the GUI over plain HTTP
