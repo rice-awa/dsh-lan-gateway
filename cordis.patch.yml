@@ -4,7 +4,7 @@
 # (password hash, cookie secret) live in ~/.dsh/lan-gateway/state.json, never in config.
 - insert:
     - id: dsh-lan-gateway
-      name: '@rice-awa/dsh-lan-gateway'
+      name: '@riceawa/dsh-lan-gateway'
       config:
         enabled: false
         gatewayPort: 3081

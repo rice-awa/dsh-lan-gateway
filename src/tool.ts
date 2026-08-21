@@ -5,7 +5,7 @@
  * dsh-super-injector does with its `dev_*` tools). The password is passed as
  * an explicit argument and never echoed back.
  *
- * @module @rice-awa/dsh-lan-gateway/tool
+ * @module @riceawa/dsh-lan-gateway/tool
  */
 
 import type { Context } from '@deepseek-ai/cordis'

@@ -33,12 +33,12 @@ pnpm 11 默认拦截，报错形如：
 Add the package to "allowBuilds" in your project's pnpm-workspace.yaml to allow it to run scripts.
 ```
 
-把报错提示给出的条目（形如 `@rice-awa/dsh-lan-gateway@<来源>#<提交>: true`）原样
+把报错提示给出的条目（形如 `@riceawa/dsh-lan-gateway@<来源>#<提交>: true`）原样
 追加到 `~/.dsh/profiles/web/pnpm-workspace.yaml`：
 
 ```yaml
 allowBuilds:
-  "@rice-awa/dsh-lan-gateway@https://codeload.github.com/rice-awa/dsh-lan-gateway/tar.gz/<提交>: true"
+  "@riceawa/dsh-lan-gateway@https://codeload.github.com/rice-awa/dsh-lan-gateway/tar.gz/<提交>: true"
 ```
 
 条目里的 `<提交>` 随版本变化，以实际报错为准；也可运行 `pnpm approve-builds`
@@ -68,7 +68,7 @@ allowBuilds:
 
 ```bash
 mkdir -p ~/.dsh/skills
-cp ~/.dsh/profiles/web/node_modules/@rice-awa/dsh-lan-gateway/skills/lan-gateway.md \
+cp ~/.dsh/profiles/web/node_modules/@riceawa/dsh-lan-gateway/skills/lan-gateway.md \
    ~/.dsh/skills/
 ```
 
@@ -85,7 +85,7 @@ dsh --profile web
 
 验证三点：
 
-- **包已就位**：`ls ~/.dsh/profiles/web/node_modules/@rice-awa/dsh-lan-gateway/lib`
+- **包已就位**：`ls ~/.dsh/profiles/web/node_modules/@riceawa/dsh-lan-gateway/lib`
   应看到 `index.js`、`client.js`、`index.d.ts`。
 - **监听开启**：对话里执行 `lan_gateway enable`（首次需先设密码，见下），日志应出现
   `dsh-lan-gateway: listening on 0.0.0.0:3081 -> 127.0.0.1:<dsh端口>`。
@@ -129,7 +129,7 @@ dsh plugin --profile web add github:rice-awa/dsh-lan-gateway
 
 ```bash
 mkdir -p ~/.dsh/skills
-cp ~/.dsh/profiles/web/node_modules/@rice-awa/dsh-lan-gateway/skills/lan-gateway.md \
+cp ~/.dsh/profiles/web/node_modules/@riceawa/dsh-lan-gateway/skills/lan-gateway.md \
    ~/.dsh/skills/
 ```
 
@@ -173,7 +173,7 @@ pnpm add "link:/path/to/dsh-lan-gateway"
 
 ```bash
 # 按包名移除（pnpm 不接受 github: 源标识，会报 no such dependency）
-dsh plugin --profile web remove @rice-awa/dsh-lan-gateway
+dsh plugin --profile web remove @riceawa/dsh-lan-gateway
 ```
 
 同时清理：`~/.dsh/profiles/web/package.json` 的 `dsh.profile.bundles` 列表、

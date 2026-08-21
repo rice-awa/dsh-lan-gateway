@@ -4,7 +4,7 @@
  * restarts reuse the same certificate instead of minting a new one every
  * boot; custom certificates are read straight from user-supplied PEM paths.
  *
- * @module @rice-awa/dsh-lan-gateway/tls
+ * @module @riceawa/dsh-lan-gateway/tls
  */
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'

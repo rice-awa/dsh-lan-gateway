@@ -7,7 +7,7 @@
  * the settings seam or any secret), so the client bundle's only dependency is
  * the `slots` service that every plugin already has.
  *
- * @module @rice-awa/dsh-lan-gateway/client/card
+ * @module @riceawa/dsh-lan-gateway/client/card
  */
 
 import { useEffect, useState, type ChangeEvent, type ReactNode } from 'react'

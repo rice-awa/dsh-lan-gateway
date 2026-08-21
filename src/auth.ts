@@ -5,7 +5,7 @@
  * can exercise them without a live server. No runtime dependencies beyond
  * node:crypto.
  *
- * @module @rice-awa/dsh-lan-gateway/auth
+ * @module @riceawa/dsh-lan-gateway/auth
  */
 
 import {

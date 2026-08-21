@@ -1,5 +1,5 @@
 /**
- * @rice-awa/dsh-lan-gateway — the LAN/internet gateway plugin for the
+ * @riceawa/dsh-lan-gateway — the LAN/internet gateway plugin for the
  * DeepSeek Harness web GUI.
  *
  * dsh's web CLI hard-refuses `--host 0.0.0.0` (exposing remote code execution
@@ -21,7 +21,7 @@
  * Disabled by default in the bundle patch (safe): the listener opens only
  * after `lan_gateway enable` or `enabled: true`.
  *
- * @module @rice-awa/dsh-lan-gateway
+ * @module @riceawa/dsh-lan-gateway
  */
 
 import type { Context } from '@deepseek-ai/cordis'
