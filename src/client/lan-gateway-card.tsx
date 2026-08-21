@@ -15,14 +15,15 @@ import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 
 /**
  * The official Settings → Plugins page declares the `settings.plugin.item`
- * list slot (kind list, root scope, empty owner share) in its own package.
- * The published package ships no `src/`, so the entry is re-declared here —
- * the runtime slot is real; this only restores the compile-time table.
+ * slot keyed by the settings namespace each card edits (newer DSH releases;
+ * older releases dispatched it as a list slot by `id`). The published package
+ * ships no `src/`, so the entry is re-declared here — the runtime slot is
+ * real; this only restores the compile-time table.
  */
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface SlotMap {
     /** One plugin's card inside the plugin configuration section. */
-    'settings.plugin.item': { kind: 'list'; scope: 'root'; owner: { children?: never } }
+    'settings.plugin.item': { kind: 'keyed'; scope: 'root'; owner: { children?: never } }
   }
 }
 

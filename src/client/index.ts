@@ -79,11 +79,25 @@ export function apply(ctx: ClientContext): void {
   // The card rides the official Plugins → Configurable tab. Like ModLens, it
   // registers with no inject face and fetches its own loopback config route,
   // so it has no settings/locale/connection service dependencies.
+  //
+  // The `settings.plugin.item` slot is keyed BY the settings namespace the
+  // card edits (rc.8 contract): the configurable tab only dispatches entries
+  // whose `options.key` is both present and served by the Host's settings
+  // describe mirror. Registering with `id` alone throws
+  // `keyed slot "settings.plugin.item" requires options.key` and the card
+  // silently disappears from Settings → Plugins.
+  //
+  // `id`/`order` ride the legacy list-slot shape (older DSH versions
+  // dispatched this slot by id): harmless metadata on the keyed slot, and
+  // what keeps the card mounting if this plugin ever loads into an older
+  // deployment. Spread from a typed constant so the keyed registration type
+  // stays exact.
+  const legacyListOptions = { id: 'lan-gateway', order: 30 } as const
   ctx.slots.inject('settings.plugin.item', function* () {
     yield ctx.slots.register({
       name: 'settings.plugin.item',
-      id: 'lan-gateway',
-      order: 30,
+      key: 'lan-gateway',
+      ...legacyListOptions,
     }, LanGatewayCard)
   })
 }
