@@ -2,7 +2,6 @@
   "name": "@dsh-external/dsh-lan-gateway",
   "description": "LAN/internet reverse-proxy gateway for the DeepSeek Harness web GUI: binds 0.0.0.0, forwards to the loopback dsh web server with header rewrite to pass the /api trust fence. LAN sources are password-free; non-LAN sources get a login page + HMAC cookie. Optional TLS with auto-generated self-signed or user-supplied certificates, and a Settings → Plugins card for live adjustment of port, CIDRs, auth, and TLS. Includes an insecure-origin UUID shim client bundle: on gateway-served plain-HTTP origins browsers lack crypto.randomUUID, so the client half patches a getRandomValues-backed randomUUID onto the Crypto prototype, fixing workspace open over LAN without touching DSH source.",
   "version": "0.3.0",
-  "private": true,
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -44,8 +43,8 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-settings": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-settings": "^0.1.0-rc.6 || ^0.1.0",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6 || ^0.1.0",
     "@deepseek-ai/schemastery": "^3.18.1"
   },
   "devDependencies": {
