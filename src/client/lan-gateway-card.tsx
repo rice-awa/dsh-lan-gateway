@@ -424,13 +424,13 @@ export function LanGatewayCard(_props: LanGatewayCardProps): ReactNode {
         aria-expanded={open}
         onClick={() => { setOpen(!open) }}
       >
-        <span style={styles.headText}>
+        <span style={styles.headerTop}>
           <span style={styles.name}>{t.title}</span>
-          <span style={styles.description}>{t.description}</span>
+          <span style={styles.status} title={statusLine}>{statusLine}</span>
+          {dirty ? <span style={styles.pending}>{t.unsaved}</span> : null}
+          <span style={open ? { ...styles.chevron, ...styles.chevronOpen } : styles.chevron}>{open ? '▾' : '▸'}</span>
         </span>
-        <span style={styles.status}>{statusLine}</span>
-        {dirty ? <span style={styles.pending}>{t.unsaved}</span> : null}
-        <span style={open ? { ...styles.chevron, ...styles.chevronOpen } : styles.chevron}>{open ? '▾' : '▸'}</span>
+        <span style={styles.description}>{t.description}</span>
       </button>
       {open
         ? (
@@ -502,8 +502,9 @@ const styles: Record<string, React.CSSProperties> = {
   },
   header: {
     display: 'flex',
-    alignItems: 'center',
-    gap: '12px',
+    flexDirection: 'column',
+    alignItems: 'stretch',
+    gap: '6px',
     width: '100%',
     padding: '14px 16px',
     border: 0,
@@ -513,10 +514,31 @@ const styles: Record<string, React.CSSProperties> = {
     textAlign: 'left',
     cursor: 'pointer',
   },
-  headText: { display: 'flex', flexDirection: 'column', gap: '4px', flex: 1, minWidth: 0 },
-  name: { fontSize: '15px', fontWeight: 600, lineHeight: 1.4, color: L.labelPrimary },
-  description: { fontSize: '13px', lineHeight: 1.5, color: L.labelTertiary },
-  status: { fontSize: '11px', color: L.labelTertiary, whiteSpace: 'nowrap' },
+  headerTop: { display: 'flex', alignItems: 'center', gap: '12px', width: '100%' },
+  name: { flex: '1 1 auto', minWidth: 0, fontSize: '15px', fontWeight: 600, lineHeight: 1.4, color: L.labelPrimary },
+  // The status carries a verbose TLS cert summary; cap it and ellipsize so it
+  // can never swallow the row or squeeze the title (the old nowrap alone
+  // caused the description to be pushed into a thin wrapping column).
+  status: {
+    flex: '0 1 auto',
+    minWidth: 0,
+    maxWidth: '60%',
+    fontSize: '11px',
+    lineHeight: 1.4,
+    color: L.labelTertiary,
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
+  description: {
+    display: 'block',
+    fontSize: '13px',
+    lineHeight: 1.5,
+    color: L.labelTertiary,
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
   pending: {
     flex: 'none',
     borderRadius: '999px',
