@@ -6,7 +6,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/DeepSeek%20Harness-4d6bfe?logo=deepseek&logoColor=fff&style=flat-square" alt="DeepSeek Harness" />
-  <img src="https://img.shields.io/badge/version-0.3.0-2b7fff?style=flat-square" alt="version 0.3.0" />
+  <img src="https://img.shields.io/badge/version-0.4.0-2b7fff?style=flat-square" alt="version 0.4.0" />
   <img src="https://img.shields.io/badge/TLS-8b5cf6?logo=lock&logoColor=fff&style=flat-square" alt="TLS" />
   <img src="https://img.shields.io/github/license/rice-awa/dsh-lan-gateway?style=flat-square" alt="MIT license" />
 </p>
