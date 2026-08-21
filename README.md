@@ -37,9 +37,9 @@
 
 ## 快速安装（推荐）
 
-请把下面这段话发送给你的 agent：
+已发布到 npm（预构建，安装无需 `allowBuilds` 授权）。请把下面这段话发送给你的 agent：
 
-> 帮我从 `https://github.com/rice-awa/dsh-lan-gateway` 安装这个 dsh 插件，遵循
+> 帮我安装 dsh 插件 `@riceawa/dsh-lan-gateway`，遵循
 > `https://github.com/rice-awa/dsh-lan-gateway/blob/main/INSTALL.md`
 
 ## 配套 skill
@@ -62,18 +62,19 @@ dsh plugin --profile web add github:mexiaosqwq/dsh-web-mobile
 
 ## 手动安装
 
-### 方式 A：使用官方 CLI 安装
+### 方式 A：npm 包（推荐，免 allowBuilds）
+
+已发布预构建产物到 npm，安装时**不需要**批准构建脚本：
 
 ```bash
 # 官方装配（重启后由 bundles 列表接管，生产态）
-dsh plugin --profile web add github:rice-awa/dsh-lan-gateway
+dsh plugin --profile web add @riceawa/dsh-lan-gateway
 ```
 
-> **注意**：`dsh plugin ... add` 把剩余参数转发给 profile 目录里的 pnpm。安装本插件时
-> pnpm 会要求先在其构建脚本白名单（`allowBuilds`）中批准本包，否则报
-> `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`。把报错提示中的条目（或 `pnpm approve-builds`
-> 的选项）写进 `~/.dsh/profiles/web/pnpm-workspace.yaml` 再重试即可。完整步骤见
-> [INSTALL.md](INSTALL.md#for-agents完整安装流程)。
+> `dsh plugin ... add` 把剩余参数转发给 profile 目录里的 pnpm，npm 包自带预构建
+> 的 `lib/`，不会触发 `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`。若仍提示，把报错
+> 条目写进 `~/.dsh/profiles/web/pnpm-workspace.yaml` 的 `allowBuilds` 再重试，
+> 完整步骤见 [INSTALL.md](INSTALL.md#for-agents完整安装流程)。
 
 ### 方式 B：从源码构建
 
@@ -83,7 +84,7 @@ cd dsh-lan-gateway
 pnpm install
 pnpm build          # host（lib/index.js）
 pnpm build:client   # client（lib/client.js，window.__ModuleLoader__ 格式）
-pnpm test           # 38 项（网关 23 + UUID shim 3 + x509 4 + TLS 6）
+pnpm test           # 39 项（网关 23 + UUID shim 3 + x509 6 + TLS 7）
 ```
 
 ## 使用
@@ -212,8 +213,8 @@ IPv6 的 `fe80::/10`（link-local）与回环地址始终免密。
 pnpm test
 # ✓ tests/gateway.test.ts   (23) 网关代理 / 登录 / HMAC / 信任围栏
 # ✓ tests/uuid-shim.test.ts ( 3) 不安全源补丁 / 安全源 no-op / v4 正确性
-# ✓ tests/x509.test.ts      ( 4) 自签名证书 DER/SAN/签名/TLS 握手
-# ✓ tests/tls.test.ts       ( 6) 证书持久化 / 重生成 / 自定义证书加载
+# ✓ tests/x509.test.ts      ( 6) 自签名证书 DER/SAN/签名/TLS 握手
+# ✓ tests/tls.test.ts       ( 7) 证书持久化 / 重生成 / 自定义证书加载
 ```
 
 ## 许可

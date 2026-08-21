@@ -5,9 +5,12 @@
 
 本文件分两条路径：
 
-- **For agents** —— 给 dsh / Claude 等 agent 的完整执行流程（含 allowBuilds 等
-  坑位与验证步骤），把这段话发给 agent 让它自己读完照做即可。
+- **For agents** —— 给 dsh / Claude 等 agent 的完整执行流程（含验证步骤），把这段话
+  发给 agent 让它自己读完照做即可。
 - **For humans** —— 给真人用户的两分钟速览（你只需要用一两条命令，不用管细节）。
+
+> **已发布到 npm**：`@riceawa/dsh-lan-gateway` 自带预构建产物，`dsh plugin ... add`
+> 时**不会**触发 `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`，无需 `allowBuilds` 审批。
 
 ---
 
@@ -16,17 +19,18 @@
 ### 1. 安装插件本体
 
 ```bash
-dsh plugin --profile web add github:rice-awa/dsh-lan-gateway
+dsh plugin --profile web add @riceawa/dsh-lan-gateway
 ```
 
 > `dsh plugin ... add` 把剩余参数转发给 profile 目录里的 pnpm；`--profile` 必填。
 > 安装成功后插件会自动被加入 `~/.dsh/profiles/web/package.json` 的依赖与
 > `dsh.profile.bundles` 列表，无需手工编辑。
 
-### 2. 处理 allowBuilds 审批
+### 2. 若从 git / 源码安装：处理 allowBuilds 审批
 
-git 安装会运行包的 `prepack` 构建脚本（tsdown 构建 host + client 两个 bundle），
-pnpm 11 默认拦截，报错形如：
+**从 npm 包安装可跳过本步**。只有当你改用 git 或源码路径安装时，才会运行包的
+`prepack` 构建脚本（tsdown 构建 host + client 两个 bundle），pnpm 11 默认拦截，报错
+形如：
 
 ```
 [ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED] Failed to prepare git-hosted package ...
@@ -110,18 +114,19 @@ enable` 会**拒绝监听**（防止把 RCE 门户开放给非 LAN 来源）。�
 
 把下面这段话发给你的 dsh agent，剩下的事它都会做：
 
-> 帮我从 `https://github.com/rice-awa/dsh-lan-gateway` 安装这个 dsh 插件，遵循
+> 帮我安装 dsh 插件 `@riceawa/dsh-lan-gateway`，遵循
 > `https://github.com/rice-awa/dsh-lan-gateway/blob/main/INSTALL.md`
 
 ### 手动装（一条命令）
 
 ```bash
-dsh plugin --profile web add github:rice-awa/dsh-lan-gateway
+dsh plugin --profile web add @riceawa/dsh-lan-gateway
 ```
 
-- 若报 `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`：按报错提示把那条 `allowBuilds`
+- npm 包自带预构建产物，无需 `allowBuilds` 审批；若仍报
+  `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`，按报错提示把那条 `allowBuilds`
   条目补进 `~/.dsh/profiles/web/pnpm-workspace.yaml`，重新执行上面的命令。
-  详细说明见 [For agents 第 2 步](#2-处理-allowbuilds-审批)。
+  详细说明见 [For agents 第 2 步](#2-若从-git--源码安装处理-allowbuilds-审批)。
 - 重启 dsh 后，在对话里说 **「设置网关密码为 …」→「开启远程访问」** 即可。
   （`lan_gateway` 是模型可调用工具，密码以参数传入、不写入配置、不回显。）
 
@@ -145,7 +150,7 @@ cd dsh-lan-gateway
 pnpm install
 pnpm build          # host：lib/index.js + lib/index.d.ts
 pnpm build:client   # client：lib/client.js（window.__ModuleLoader__ 格式）
-pnpm test           # 38 项（网关 23 + UUID shim 3 + x509 4 + TLS 6）
+pnpm test           # 39 项（网关 23 + UUID shim 3 + x509 6 + TLS 7）
 ```
 
 构建产物在 `lib/`（已被 `.gitignore` 排除，不随仓库提交）。
@@ -159,7 +164,7 @@ pnpm add "link:/path/to/dsh-lan-gateway"
 
 ## 常见问题
 
-- **`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`**：见 [For agents 第 2 步](#2-处理-allowbuilds-审批)。
+- **`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`**：见 [For agents 第 2 步](#2-若从-git--源码安装处理-allowbuilds-审批)。
 - **`dsh plugin --profile <名> add ...` 报 `required option '--profile <name>'`**：
   `--profile` 是必填项；先确认 profile 存在（`~/.dsh/profiles/<名>/`）。
 - **端口 3081 被占用**：改 `gatewayPort`（bundle patch 的 config，或 Settings →
