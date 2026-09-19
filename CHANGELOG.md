@@ -1,5 +1,21 @@
 # 更新日志
 
+## 0.5.4
+
+一轮针对 0.5.x 实现细节的代码复审修复，清单见 [docs/security/audit-2026-09-19-fix-list.md](docs/security/audit-2026-09-19-fix-list.md)。四项为与上游会话设计耦合的问题，四项为独立的小缺陷。
+
+归属路径判定改为路由归一化。`isOwnedPath` 原先对 `req.url` 做原始字符串前缀匹配，而 dsh 的路由层用 `new URL(...).pathname` 取路径、WHATWG 会折叠点段。两者在 `/foo/../lan-gateway/config` 上分歧：网关判为不归属而放进中继，dsh 归一化后正好命中插件自己的 `/lan-gateway/config` 路由——而该路由只要求 Host 是回环，网关恰恰把 Host 改写成回环。结果「网关从不转发自己的管理面」这条不变式不成立。现在归属、登录、登出三处判定统一用归一化路径，转发仍走原始 `req.url`。
+
+客户端 `dsh-auth-*` Cookie 不再能遮蔽中继会话。`attachUpstreamSession` 把中继会话追加在客户端 Cookie 之后，上游取第一个同名段，于是一个客户端自带的同名 Cookie（典型来源是 dsh 签名密钥被重置后遗留的旧 Cookie）会一直压住中继那条：验签失败 → 上游 401 → 网关按 401 启发式丢弃中继会话 → 下个请求重新换取 → 又被压住。转发前先剥离该命名空间，中继持有的成为唯一一条。
+
+上游 `Set-Cookie` 不再原样回传。dsh 唯一签发 Cookie 的路由是 `GET /?token=` 的交换，透传等于让已通过网关门的客户端把「骑共享会话」升级为「提取一条持久会话」。现在响应转发时剥离 hop-by-hop 头，并剥离 `set-cookie` 中的 `dsh-auth-*`（其他路由的 Cookie 仍透传）。
+
+中继日志不再记录 launch token。`acquiring session from ${url}` 把整条带 `?token=` 的 URL 打进日志，那是个 bearer 凭据。
+
+另外四项：`RateLimiter.prune()` 此前无调用者，一次性来源的桶永久驻留，现在按窗口清扫并加了桶表上限；`verifyPassword` 改用异步 scrypt，不再让登录尝试阻塞与 dsh 共用的事件循环；客户端提供的 `X-Forwarded-*` / `Forwarded` 转发前删除；`fe80::/10` 判定此前只覆盖 `fe80::/16`，改为按前 10 bit 判定。
+
+`docs/security/audit-2026-09-19-fix-list.md` 同时记录了几项评估后决定不改的：登出不推进会话代次、自签证书默认 825 天、`/__login/` 尾斜杠、未绑定 IPv6。
+
 ## 0.5.3
 
 修掉明文代理入口下的登录死循环。声明了 `trustedTerminator`、但那个代理只做明文用户鉴权（浏览器以 `http://` 访问代理）时，密码输对了也会立刻弹回 `/__login`。

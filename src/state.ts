@@ -9,7 +9,7 @@
 
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
+import { randomBytes, scrypt, scryptSync, timingSafeEqual } from 'node:crypto'
 import { homedir } from 'node:os'
 
 /** The state directory: `~/.dsh/lan-gateway`. */
@@ -41,13 +41,28 @@ export interface GatewayState {
 
 const STATE_FILENAME = 'state.json'
 
-/** Whether a password is present and passes scrypt verification. */
-export function verifyPassword(state: GatewayState, password: string): boolean {
+/** Promise wrapper around the threaded `scrypt`, which runs off the main loop. */
+function deriveKey(password: string, salt: Buffer, keylen: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    scrypt(password, salt, keylen, (error, derived) => {
+      if (error !== null) reject(error)
+      else resolve(derived)
+    })
+  })
+}
+
+/**
+ * Whether a password is present and passes scrypt verification. Asynchronous
+ * on purpose: `scryptSync` occupies the event loop for tens of milliseconds
+ * per attempt, and that loop is shared with the dsh process the gateway is
+ * forwarding to.
+ */
+export async function verifyPassword(state: GatewayState, password: string): Promise<boolean> {
   if (state.password === undefined) return false
   const { hash, salt } = state.password
   try {
     const expected = Buffer.from(hash, 'hex')
-    const actual = scryptSync(password, Buffer.from(salt, 'hex'), expected.length)
+    const actual = await deriveKey(password, Buffer.from(salt, 'hex'), expected.length)
     return expected.length === actual.length && timingSafeEqual(expected, actual)
   } catch {
     return false

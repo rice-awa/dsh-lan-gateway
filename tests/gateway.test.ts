@@ -93,6 +93,17 @@ describe('classifySource', () => {
     expect(classifySource('8.8.8.8', ['8.8.8.0/24'])).toBe('lan')
   })
 
+  it('covers the whole of fe80::/10, not just fe80::/16', () => {
+    // fe80::/10 is the first ten bits 1111111010 → leading hextet fe80–febf.
+    expect(classifySource('fe80::1')).toBe('lan')
+    expect(classifySource('fe90::1')).toBe('lan')
+    expect(classifySource('febf::1')).toBe('lan')
+    expect(classifySource('FE80::1')).toBe('lan')
+    // Just outside the range on either side.
+    expect(classifySource('fe7f::1')).toBe('internet')
+    expect(classifySource('fec0::1')).toBe('internet') // site-local, deprecated
+  })
+
   it('treats unknown as internet (never trusts)', () => {
     expect(classifySource(undefined)).toBe('internet')
     expect(classifySource('')).toBe('internet')
@@ -155,33 +166,33 @@ describe('session cookies', () => {
 })
 
 describe('password state', () => {
-  it('round-trips set -> verify', () => {
+  it('round-trips set -> verify', async () => {
     let state: GatewayState = { cookieSecret: 'a'.repeat(32), sessionEpoch: 0 }
-    expect(verifyPassword(state, 'hunter2')).toBe(false)
+    expect(await verifyPassword(state, 'hunter2')).toBe(false)
     state = setPassword(state, 'hunter2')
     expect(state.password).toBeDefined()
-    expect(verifyPassword(state, 'hunter2')).toBe(true)
-    expect(verifyPassword(state, 'hunter3')).toBe(false)
-    expect(verifyPassword(state, '')).toBe(false)
+    expect(await verifyPassword(state, 'hunter2')).toBe(true)
+    expect(await verifyPassword(state, 'hunter3')).toBe(false)
+    expect(await verifyPassword(state, '')).toBe(false)
   })
 
-  it('clears the password', () => {
+  it('clears the password', async () => {
     let state: GatewayState = setPassword({ cookieSecret: 'a'.repeat(32), sessionEpoch: 0 }, 'hunter2')
     state = setPassword(state, undefined)
     expect(state.password).toBeUndefined()
-    expect(verifyPassword(state, 'hunter2')).toBe(false)
+    expect(await verifyPassword(state, 'hunter2')).toBe(false)
   })
 
-  it('re-salts on every write (hashes differ)', () => {
+  it('re-salts on every write (hashes differ)', async () => {
     const base: GatewayState = { cookieSecret: 'a'.repeat(32), sessionEpoch: 0 }
     const a = setPassword(base, 'same-password')
     const b = setPassword(base, 'same-password')
     expect(a.password!.hash).not.toBe(b.password!.hash)
-    expect(verifyPassword(a, 'same-password')).toBe(true)
-    expect(verifyPassword(b, 'same-password')).toBe(true)
+    expect(await verifyPassword(a, 'same-password')).toBe(true)
+    expect(await verifyPassword(b, 'same-password')).toBe(true)
   })
 
-  it('persists to disk and reloads', () => {
+  it('persists to disk and reloads', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-gw-state-'))
     const home = join(dir, 'fake-home')
     try {
@@ -191,7 +202,7 @@ describe('password state', () => {
 
       const reloaded = loadState(home)
       expect(reloaded.cookieSecret).toBe('c'.repeat(32))
-      expect(verifyPassword(reloaded, 'persisted-pass')).toBe(true)
+      expect(await verifyPassword(reloaded, 'persisted-pass')).toBe(true)
 
       const files = readdirSync(stateDir(home))
       expect(files).toContain('state.json')
@@ -240,6 +251,11 @@ describe('password state', () => {
 })
 
 describe('RateLimiter', () => {
+  /** The live bucket count. `buckets` is private but present at runtime. */
+  function bucketCount(limiter: RateLimiter): number {
+    return (limiter as unknown as { buckets: Map<string, unknown> }).buckets.size
+  }
+
   it('allows up to the token budget then blocks', () => {
     const limiter = new RateLimiter(3, 60_000)
     expect(limiter.allow('1.1.1.1')).toBe(true)
@@ -258,5 +274,26 @@ describe('RateLimiter', () => {
     expect(limiter.allow('1.1.1.1')).toBe(false)
     vi.setSystemTime(1_700_000_000_000 + 101)
     expect(limiter.allow('1.1.1.1')).toBe(true)
+  })
+
+  it('sweeps expired buckets without waiting for their keys to return', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_700_000_000_000)
+    const limiter = new RateLimiter(1, 100)
+    // A one-shot source that will never post again.
+    expect(limiter.allow('9.9.9.9')).toBe(true)
+    vi.setSystemTime(1_700_000_000_000 + 101)
+    // A different source's attempt trips the sweep; the stale bucket is gone.
+    expect(limiter.allow('8.8.8.8')).toBe(true)
+    expect(bucketCount(limiter)).toBe(1)
+  })
+
+  it('keeps the bucket table under its ceiling', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_700_000_000_000)
+    const limiter = new RateLimiter(1, 60_000)
+    // All in one window, so expiry reclaims nothing: the ceiling must.
+    for (let i = 0; i < 10_500; i += 1) limiter.allow(`10.0.${(i >> 8) & 0xff}.${i & 0xff}`)
+    expect(bucketCount(limiter)).toBeLessThanOrEqual(10_000)
   })
 })

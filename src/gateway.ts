@@ -83,15 +83,89 @@ const LOGIN_ATTEMPTS_WINDOW_MS = 60_000
 /** Methods a browser never attaches a CSRF-meaningful body to; safe without an Origin. */
 const READ_ONLY_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
 
+/** The upstream browser-session cookie name prefix; the relay owns this namespace. */
+const UPSTREAM_COOKIE_PREFIX = 'dsh-auth-'
+
+/**
+ * Headers a proxy must not forward in either direction (RFC 9110 §7.6.1), plus
+ * the non-standard proxy-connection.
+ */
+const HOP_BY_HOP_HEADERS = new Set([
+  'connection',
+  'keep-alive',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'proxy-connection',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+])
+
+/**
+ * Headers by which a client asserts where a request came from. The gateway
+ * classifies on `socket.remoteAddress` and never reads these, so relaying a
+ * caller's own values only hands the next hop a forgeable claim.
+ */
+const FORWARDING_HEADERS = [
+  'forwarded',
+  'x-forwarded-for',
+  'x-forwarded-host',
+  'x-forwarded-port',
+  'x-forwarded-proto',
+  'x-real-ip',
+]
+
+/** Whether a Cookie fragment names the upstream session cookie. */
+function isUpstreamSessionPair(pair: string): boolean {
+  return pair.startsWith(UPSTREAM_COOKIE_PREFIX)
+}
+
+/**
+ * Drop every `dsh-auth-*` pair from a Cookie header, returning the remainder
+ * (possibly '').
+ *
+ * `attachUpstreamSession` appends the relay's session to the client's own
+ * cookie, and upstream reads the FIRST name match. A client that holds any
+ * `dsh-auth-<hash>` — typically one minted before dsh's signing secret was
+ * reset, so still present but no longer verifying — would therefore shadow the
+ * relay's session on every request. That draws a 401, the gateway reads the
+ * 401 as "upstream revoked our session" and discards it, the next request
+ * re-acquires, and the client's stale cookie shadows that one too: a loop that
+ * never converges. Stripping the namespace makes the relay's copy the only one.
+ */
+function withoutUpstreamSessionPairs(cookie: string): string {
+  return cookie
+    .split(';')
+    .map((pair) => pair.trim())
+    .filter((pair) => pair !== '' && !isUpstreamSessionPair(pair))
+    .join('; ')
+}
+
 /** Prefixes the gateway owns and must never relay to dsh. */
 function isOwnedPath(pathname: string): boolean {
   return pathname === '/lan-gateway' || pathname.startsWith('/lan-gateway/')
 }
 
-/** The pathname of a request URL (query string stripped, not decoded). */
+/**
+ * The pathname a request is routed by, resolved the way dsh's router resolves
+ * it: WHATWG URL parsing, which strips the query and collapses dot segments.
+ *
+ * The decision paths below (owned prefix, login, logout) must use this rather
+ * than the raw request target. dsh normalizes before matching, so a raw-string
+ * test disagrees with it on `/foo/../lan-gateway/config` — that is not an owned
+ * path by string prefix, stays in the relay, and lands on the plugin's own
+ * config route once Host has been rewritten to loopback. Forwarding still
+ * relays the raw target: dsh applies the same normalization itself.
+ */
 function pathOf(url: string): string {
-  const query = url.indexOf('?')
-  return query === -1 ? url : url.slice(0, query)
+  try {
+    return new URL(url, 'http://gateway.invalid').pathname
+  } catch {
+    // Unparseable here means unparseable for dsh too; the raw target routes
+    // nowhere and is relayed as-is.
+    return url
+  }
 }
 
 /**
@@ -312,7 +386,7 @@ export class LanGateway {
       return
     }
 
-    void readBody(req, DEFAULT_BODY_LIMIT_BYTES, res).then((body) => {
+    void readBody(req, DEFAULT_BODY_LIMIT_BYTES, res).then(async (body) => {
       if (body === undefined) return // response already sent (413/400)
       let password: string | undefined
       try {
@@ -321,7 +395,8 @@ export class LanGateway {
       } catch {
         password = undefined
       }
-      if (password === undefined || !verifyPassword(this.state, password)) {
+      const accepted = password !== undefined && await verifyPassword(this.state, password)
+      if (!accepted) {
         this.serveLoginError(res, 'Incorrect password.')
         return
       }
@@ -334,6 +409,14 @@ export class LanGateway {
         'set-cookie': [this.sessionSetCookie(cookie, maxAgeSeconds)],
       })
       res.end()
+    }).catch(() => {
+      // The body reader reports its own failures through the response; this
+      // catches the async verification path so it cannot become an unhandled
+      // rejection.
+      if (!res.headersSent) {
+        res.writeHead(500, this.securityHeaders())
+        res.end('login failed')
+      }
     })
   }
 
@@ -371,6 +454,14 @@ export class LanGateway {
       delete headers.connection
       delete headers.upgrade
     }
+    // A caller's own forwarding claims are not ours to relay.
+    for (const name of FORWARDING_HEADERS) delete headers[name]
+    // The relay is the only authority on the upstream session cookie.
+    if (typeof headers.cookie === 'string') {
+      const kept = withoutUpstreamSessionPairs(headers.cookie)
+      if (kept === '') delete headers.cookie
+      else headers.cookie = kept
+    }
     return headers
   }
 
@@ -385,6 +476,31 @@ export class LanGateway {
       ? `${existing}; ${cookie}`
       : cookie
     return true
+  }
+
+  /**
+   * The headers to send back to the client: hop-by-hop headers dropped, and
+   * the upstream session cookie withheld. Upstream's one cookie-minting route
+   * is the launch-token exchange at `/`, so a client that already holds a
+   * gateway session could otherwise post the token through the gateway and
+   * walk away with a durable upstream credential the relay exists to keep on
+   * this side. Cookies from other routes (plugins) still pass through.
+   */
+  private downstreamHeaders(upstream: http.IncomingHttpHeaders): http.OutgoingHttpHeaders {
+    const headers: http.OutgoingHttpHeaders = {}
+    for (const [key, value] of Object.entries(upstream)) {
+      if (value === undefined) continue
+      const lower = key.toLowerCase()
+      if (HOP_BY_HOP_HEADERS.has(lower)) continue
+      if (lower === 'set-cookie') {
+        const list = (Array.isArray(value) ? value : [value])
+          .filter((entry) => !isUpstreamSessionPair(entry.trim()))
+        if (list.length > 0) headers[key] = list
+        continue
+      }
+      headers[key] = value
+    }
+    return headers
   }
 
   /** Forward an HTTP request to dsh, replaying the shared upstream session. */
@@ -407,7 +523,7 @@ export class LanGateway {
       if (attached && session !== undefined && proxyRes.statusCode === 401) {
         session.invalidate()
       }
-      res.writeHead(proxyRes.statusCode ?? 502, proxyRes.headers)
+      res.writeHead(proxyRes.statusCode ?? 502, this.downstreamHeaders(proxyRes.headers))
       proxyRes.pipe(res)
     })
     proxyReq.on('error', () => {

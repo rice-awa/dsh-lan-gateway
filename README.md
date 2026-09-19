@@ -6,7 +6,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/DeepSeek%20Harness-4d6bfe?logo=deepseek&logoColor=fff&style=flat-square" alt="DeepSeek Harness" />
-  <img src="https://img.shields.io/badge/version-0.5.3-2b7fff?style=flat-square" alt="version 0.5.3" />
+  <img src="https://img.shields.io/badge/version-0.5.4-2b7fff?style=flat-square" alt="version 0.5.4" />
   <img src="https://img.shields.io/badge/TLS-8b5cf6?logo=lock&logoColor=fff&style=flat-square" alt="TLS" />
   <img src="https://img.shields.io/github/license/rice-awa/dsh-lan-gateway?style=flat-square" alt="MIT license" />
   <a href="https://awesome-dsh-plugin.com"><img src="https://awesome-dsh-plugin.com/badge.svg" alt="awesome · DSH plugin" /></a>
@@ -221,8 +221,8 @@ pnpm typecheck   # tsc 双端（host + client）
 pnpm install --frozen-lockfile
 pnpm typecheck && pnpm test
 npm publish --access public                       # prepack 自动构建 lib/
-git tag -a v0.5.3 -m "…" && git push origin v0.5.3
-gh release create v0.5.3 --generate-notes ./*.tgz # 可选：Release + tgz 附件
+git tag -a v0.5.4 -m "…" && git push origin v0.5.4
+gh release create v0.5.4 --generate-notes ./*.tgz # 可选：Release + tgz 附件
 ```
 
 ## 安全评估
@@ -232,6 +232,7 @@ gh release create v0.5.3 --generate-notes ./*.tgz # 可选：Release + tgz 附�
 - [LAN 网关安全评估](docs/security/SECURITY-AUDIT.md)：0.4.0 时代的 F1–F5 审计快照与 13 个隔离观察，顶部标注了 0.5.0 的修复状态。
 - [QVD-2026-57410 修复方案](docs/security/qvd-2026-57410-fix-plan.md)：方案全文 + §15 实施状态。
 - [上游研究](docs/security/qvd-2026-57410-research.md)：公开通告、上游提交与版本核对。
+- [0.5.4 复审与修复清单](docs/security/audit-2026-09-19-fix-list.md)：0.5.3 的实现细节复审（G1–G8）与修复记录。
 
 ## 许可
 
