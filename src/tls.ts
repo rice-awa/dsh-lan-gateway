@@ -105,6 +105,29 @@ export function regenerateSelfSigned(opts: SelfSignedTlsOptions, home: string = 
   return material
 }
 
+/**
+ * Read the persisted self-signed certificate for a status report, or undefined
+ * when none has been generated yet.
+ *
+ * Nothing is created or written here. The status path answers a question about
+ * a listener that is already running (or was), and minting a key pair — an RSA
+ * generation plus two file writes — to answer a read would both be slow and
+ * leave material on disk for a gateway that never started. Generation belongs
+ * to {@link loadOrRenewSelfSigned} and {@link regenerateSelfSigned}.
+ * @param home - dsh home override (tests).
+ * @returns the certificate material as persisted, or undefined.
+ */
+export function readSelfSignedStatus(home: string = homedir()): TlsMaterial | undefined {
+  const dir = tlsDir(home)
+  const certPath = join(dir, SELF_SIGNED_CERT_FILE)
+  const keyPath = join(dir, SELF_SIGNED_KEY_FILE)
+  if (!existsSync(certPath) || !existsSync(keyPath)) return undefined
+  const cert = readFileSync(certPath, 'utf8')
+  const key = readFileSync(keyPath, 'utf8')
+  new X509Certificate(cert) // sanity: must parse as a certificate
+  return { cert, key }
+}
+
 function generateSelfSignedMaterial(opts: SelfSignedTlsOptions): TlsMaterial {
   const hosts = opts.hosts.map(h => h.trim()).filter(h => h !== '')
   if (hosts.length === 0) {

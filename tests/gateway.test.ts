@@ -11,7 +11,6 @@ import {
   parseIpv4,
   RateLimiter,
   signCookie,
-  verifyCookie,
   verifySession,
 } from '../src/auth.ts'
 import {
@@ -117,15 +116,20 @@ describe('classifySource', () => {
 describe('session cookies', () => {
   const secret = 'test-secret-1234567890'
 
+  // These assertions go through `verifySession` directly. A test-only boolean
+  // wrapper used to sit in front of it, which meant the tests proved the
+  // wrapper's behaviour rather than the verification path the gateway actually
+  // runs — the two could drift with nothing to catch it.
+
   it('signs and verifies a valid cookie', () => {
     const cookie = signCookie(secret, 9999999999999)
-    expect(verifyCookie(secret, cookie, Date.now())).toBe(true)
+    expect(verifySession(secret, cookie, Date.now()) !== undefined).toBe(true)
   })
 
   it('rejects an expired cookie', () => {
     const now = 1_000_000_000_000
     const cookie = signCookie(secret, now - 1)
-    expect(verifyCookie(secret, cookie, now)).toBe(false)
+    expect(verifySession(secret, cookie, now) !== undefined).toBe(false)
   })
 
   it('rejects a tampered payload', () => {
@@ -133,38 +137,38 @@ describe('session cookies', () => {
     const [payload, sig] = cookie.split('.')
     const forged = `${payload!.replace(/\d/g, (d) => String((Number(d) + 1) % 10))}.${sig}`
     expect(forged).not.toBe(cookie)
-    expect(verifyCookie(secret, forged, Date.now())).toBe(false)
+    expect(verifySession(secret, forged, Date.now()) !== undefined).toBe(false)
   })
 
   it('rejects a cookie signed with a different secret', () => {
     const cookie = signCookie('other-secret-0000000000', 9999999999999)
-    expect(verifyCookie(secret, cookie, Date.now())).toBe(false)
+    expect(verifySession(secret, cookie, Date.now()) !== undefined).toBe(false)
   })
 
   it('rejects malformed values', () => {
-    expect(verifyCookie(secret, undefined, Date.now())).toBe(false)
-    expect(verifyCookie(secret, '', Date.now())).toBe(false)
-    expect(verifyCookie(secret, 'no-dot-here', Date.now())).toBe(false)
-    expect(verifyCookie(secret, 'a.b!c', Date.now())).toBe(false)
-    expect(verifyCookie(secret, '!!!!.!!!!', Date.now())).toBe(false)
+    expect(verifySession(secret, undefined, Date.now()) !== undefined).toBe(false)
+    expect(verifySession(secret, '', Date.now()) !== undefined).toBe(false)
+    expect(verifySession(secret, 'no-dot-here', Date.now()) !== undefined).toBe(false)
+    expect(verifySession(secret, 'a.b!c', Date.now()) !== undefined).toBe(false)
+    expect(verifySession(secret, '!!!!.!!!!', Date.now()) !== undefined).toBe(false)
   })
 
   it('rejects a non-numeric expiry claim', () => {
     const payload = Buffer.from(JSON.stringify({ exp: 'soon' })).toString('base64url')
     const sig = payload // wrong signature also fine — tamper must fail anyway
-    expect(verifyCookie(secret, `${payload}.${sig}`, Date.now())).toBe(false)
+    expect(verifySession(secret, `${payload}.${sig}`, Date.now()) !== undefined).toBe(false)
   })
 
   it('rejects a cookie signed under a different session epoch', () => {
     const cookie = signCookie(secret, 9999999999999, 1)
-    expect(verifyCookie(secret, cookie, Date.now(), 0)).toBe(false)
-    expect(verifyCookie(secret, cookie, Date.now(), 1)).toBe(true)
+    expect(verifySession(secret, cookie, Date.now(), 0) !== undefined).toBe(false)
+    expect(verifySession(secret, cookie, Date.now(), 1) !== undefined).toBe(true)
   })
 
   it('treats an epoch-less (pre-0.5.0) cookie as epoch 0', () => {
     const cookie = signCookie(secret, 9999999999999) // no epoch → 0
-    expect(verifyCookie(secret, cookie, Date.now(), 0)).toBe(true)
-    expect(verifyCookie(secret, cookie, Date.now(), 1)).toBe(false)
+    expect(verifySession(secret, cookie, Date.now(), 0) !== undefined).toBe(true)
+    expect(verifySession(secret, cookie, Date.now(), 1) !== undefined).toBe(false)
   })
 
   it('reports the claims a cookie carries, including its session id', () => {
@@ -183,7 +187,7 @@ describe('session cookies', () => {
     expect(verifySession(secret, cookie, Date.now(), 0)?.sid).toBeUndefined()
   })
 
-  it('verifySession refuses exactly what verifyCookie refuses', () => {
+  it('refuses undefined, empty, malformed and mis-signed values alike', () => {
     const now = 1_000_000_000_000
     expect(verifySession(secret, undefined, now)).toBeUndefined()
     expect(verifySession(secret, '', now)).toBeUndefined()
@@ -261,12 +265,12 @@ describe('session revocation', () => {
     }
   })
 
-  it('a password change drops the list — the new epoch already covers it', () => {
+  it('a password change drops the list — the new epoch already covers it', async () => {
     const state: GatewayState = {
       ...base,
       revokedSessions: { 'session-a': Date.now() + 60_000 },
     }
-    expect(setPassword(state, 'hunter2').revokedSessions).toBeUndefined()
+    expect((await setPassword(state, 'hunter2')).revokedSessions).toBeUndefined()
   })
 })
 
@@ -274,7 +278,7 @@ describe('password state', () => {
   it('round-trips set -> verify', async () => {
     let state: GatewayState = { cookieSecret: 'a'.repeat(32), sessionEpoch: 0 }
     expect(await verifyPassword(state, 'hunter2')).toBe(false)
-    state = setPassword(state, 'hunter2')
+    state = await setPassword(state, 'hunter2')
     expect(state.password).toBeDefined()
     expect(await verifyPassword(state, 'hunter2')).toBe(true)
     expect(await verifyPassword(state, 'hunter3')).toBe(false)
@@ -282,16 +286,16 @@ describe('password state', () => {
   })
 
   it('clears the password', async () => {
-    let state: GatewayState = setPassword({ cookieSecret: 'a'.repeat(32), sessionEpoch: 0 }, 'hunter2')
-    state = setPassword(state, undefined)
+    let state: GatewayState = await setPassword({ cookieSecret: 'a'.repeat(32), sessionEpoch: 0 }, 'hunter2')
+    state = await setPassword(state, undefined)
     expect(state.password).toBeUndefined()
     expect(await verifyPassword(state, 'hunter2')).toBe(false)
   })
 
   it('re-salts on every write (hashes differ)', async () => {
     const base: GatewayState = { cookieSecret: 'a'.repeat(32), sessionEpoch: 0 }
-    const a = setPassword(base, 'same-password')
-    const b = setPassword(base, 'same-password')
+    const a = await setPassword(base, 'same-password')
+    const b = await setPassword(base, 'same-password')
     expect(a.password!.hash).not.toBe(b.password!.hash)
     expect(await verifyPassword(a, 'same-password')).toBe(true)
     expect(await verifyPassword(b, 'same-password')).toBe(true)
@@ -301,7 +305,7 @@ describe('password state', () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-gw-state-'))
     const home = join(dir, 'fake-home')
     try {
-      let state = setPassword({ cookieSecret: 'b'.repeat(32), sessionEpoch: 0 }, 'persisted-pass')
+      let state = await setPassword({ cookieSecret: 'b'.repeat(32), sessionEpoch: 0 }, 'persisted-pass')
       state = { ...state, cookieSecret: 'c'.repeat(32) }
       saveState(state, home)
 
@@ -331,10 +335,10 @@ describe('password state', () => {
     }
   })
 
-  it('setting and clearing the password bump the session epoch', () => {
-    let state = setPassword({ cookieSecret: 'a'.repeat(32), sessionEpoch: 0 }, 'hunter2')
+  it('setting and clearing the password bump the session epoch', async () => {
+    const state = await setPassword({ cookieSecret: 'a'.repeat(32), sessionEpoch: 0 }, 'hunter2')
     expect(state.sessionEpoch).toBe(1)
-    const cleared = setPassword(state, undefined)
+    const cleared = await setPassword(state, undefined)
     expect(cleared.sessionEpoch).toBe(2)
     expect(cleared.password).toBeUndefined()
   })

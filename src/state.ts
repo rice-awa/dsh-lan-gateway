@@ -9,7 +9,7 @@
 
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { randomBytes, scrypt, scryptSync, timingSafeEqual } from 'node:crypto'
+import { randomBytes, scrypt, timingSafeEqual } from 'node:crypto'
 import { homedir } from 'node:os'
 
 /** The state directory: `~/.dsh/lan-gateway`. */
@@ -84,8 +84,13 @@ export async function verifyPassword(state: GatewayState, password: string): Pro
  * Set (or clear) the password, re-salted on every write. Both operations bump
  * the session epoch so every cookie issued under the previous epoch dies — a
  * password change must invalidate sessions the old password authorized.
+ *
+ * Deriving the key is asynchronous for the same reason
+ * {@link verifyPassword} is: `scryptSync` occupies the event loop for tens of
+ * milliseconds, and that loop is shared with the dsh process the gateway
+ * forwards to. Every caller is already async.
  */
-export function setPassword(state: GatewayState, password: string | undefined): GatewayState {
+export async function setPassword(state: GatewayState, password: string | undefined): Promise<GatewayState> {
   // The new epoch invalidates every cookie on its own account, so the list of
   // individually revoked sessions has nothing left to say: drop it rather than
   // carry entries that can never match again.
@@ -95,7 +100,7 @@ export function setPassword(state: GatewayState, password: string | undefined): 
   }
   if (password === undefined) return base
   const salt = randomBytes(16)
-  const hash = scryptSync(password, salt, 64)
+  const hash = await deriveKey(password, salt, 64)
   return {
     ...base,
     password: { hash: hash.toString('hex'), salt: salt.toString('hex') },
@@ -107,9 +112,15 @@ export function setPassword(state: GatewayState, password: string | undefined): 
  * @param expiresMs - the revoked cookie's own expiry. Past it the cookie is
  *   rejected on its own account, so the entry is no longer needed; dropping
  *   expired entries here is what keeps the list bounded.
+ * @param now - epoch millis to judge the existing entries against, injected so
+ *   a test can age the list without fake timers.
  */
-export function revokeSession(state: GatewayState, sid: string, expiresMs: number): GatewayState {
-  const now = Date.now()
+export function revokeSession(
+  state: GatewayState,
+  sid: string,
+  expiresMs: number,
+  now: number = Date.now(),
+): GatewayState {
   const revoked: Record<string, number> = {}
   for (const [id, exp] of Object.entries(state.revokedSessions ?? {})) {
     if (exp > now) revoked[id] = exp

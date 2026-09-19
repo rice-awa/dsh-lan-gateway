@@ -43,12 +43,20 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { randomBytes } from 'node:crypto'
-import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { IncomingMessage, ServerResponse } from 'http'
 import z from '@deepseek-ai/schemastery'
-import type { SettingsScope } from '@deepseek-ai/dsh-settings'
+import type { SettingsProvider, SettingsScope } from '@deepseek-ai/dsh-settings'
 import { DEFAULT_LAN_CIDR_STRINGS, originMatchesHost } from './auth.ts'
+import {
+  CONFIG_FIELD_KEYS,
+  OPTIONAL_CONFIG_KEYS,
+} from './config-fields.ts'
 import { LanGateway } from './gateway.ts'
 import { readBody } from './login.ts'
+import {
+  isLoopbackHost,
+  READ_ONLY_METHODS,
+} from './request-policy.ts'
 import {
   loadState,
   saveState,
@@ -57,10 +65,10 @@ import {
 } from './state.ts'
 import {
   describeCert,
-  loadCustomCert,
-  loadOrCreateSelfSigned,
   loadOrRenewSelfSigned,
+  loadCustomCert,
   parseSelfSignedHosts,
+  readSelfSignedStatus,
   regenerateSelfSigned,
   type TlsMaterial,
 } from './tls.ts'
@@ -132,12 +140,17 @@ export interface Config {
   /**
    * Removed capability: authentication is always required. Retained only so an
    * explicit legacy `authRequired: false` is rejected loudly instead of
-   * silently ignored.
+   * silently ignored. Not card-editable and never written back to the user
+   * section — the config route builds its patch from the editable key set.
    */
   authRequired?: boolean
   /** Session cookie lifetime in days. */
   cookieMaxAgeDays: number
-  /** Cookie name. */
+  /**
+   * Cookie name. Deliberately not card-editable — see the editable key set in
+   * `config-fields.ts`; the config route applies a patch, so an operator's
+   * custom name survives every save from the Settings card.
+   */
   cookieName: string
   /** Whether the gateway listener speaks TLS. */
   tlsEnabled: boolean
@@ -147,7 +160,13 @@ export interface Config {
   tlsCertPath?: string
   /** Custom mode: path to the PEM private key. */
   tlsKeyPath?: string
-  /** Self-signed mode: comma/space separated DNS names and IPs for the SANs. */
+  /**
+   * Self-signed mode: comma/space separated DNS names and IPs for the SANs.
+   *
+   * Read when a certificate is generated, not when it is served: changing it
+   * does not replace a certificate that already exists and is still valid. Use
+   * `lan_gateway tls-regenerate` for that.
+   */
   tlsSelfSignedHosts?: string
   /**
    * Self-signed certificate validity in days (default 825 ≈ 27 months).
@@ -160,6 +179,8 @@ export interface Config {
    * self-signed certificate is either clicked through or trusted by hand,
    * there is nothing to gain from the shorter window and a re-trust to lose
    * every time it lapses.
+   *
+   * Like `tlsSelfSignedHosts`, this applies to the next generation only.
    */
   tlsCertMaxAgeDays: number
   /**
@@ -171,6 +192,11 @@ export interface Config {
    * An identifier for a trusted TLS-terminating proxy in front of the gateway.
    * Declaring one marks the ingress encrypted (Secure cookies, passes the
    * encrypted-ingress gate) without this listener sending HSTS.
+   *
+   * Note the coupling with login rate limiting: the limiter is keyed by
+   * `socket.remoteAddress`, and `X-Forwarded-For` is deliberately untrusted, so
+   * behind such a proxy every browser shares one bucket — the login budget
+   * becomes per-deployment, not per-client.
    */
   trustedTerminator?: string
   /**
@@ -190,9 +216,6 @@ export interface Config {
  * shape works against both that release line and the older branded one.
  */
 const NS = 'lan-gateway'
-
-/** Optional config keys: an empty submitted value clears them back to the composition layer. */
-const OPTIONAL_CONFIG_KEYS = new Set(['dshTargetPort', 'tlsCertPath', 'tlsKeyPath', 'trustedTerminator'])
 
 /** Schemastery configuration validated by the Loader. */
 export const Config: z<Config> = z.object({
@@ -315,34 +338,28 @@ function listenerKey(cfg: Config, relayAvailable: boolean): string {
   ])
 }
 
-/** One-line TLS description for status output. */
+/**
+ * One-line TLS description for status output.
+ *
+ * Never generates: this is the read path behind `GET /lan-gateway/config` and
+ * `lan_gateway status`, and a status query that mints an RSA key and writes a
+ * certificate to disk is not a read. The material is created when the listener
+ * starts, or by `lan_gateway tls-regenerate`.
+ */
 function tlsStatusLine(cfg: Config): string {
   if (!cfg.tlsEnabled) return 'off'
   if (cfg.tlsMode === 'custom') {
     return `custom (${cfg.tlsCertPath ?? '?'}, ${cfg.tlsKeyPath ?? '?'})`
   }
   try {
-    const hosts = parseSelfSignedHosts(cfg.tlsSelfSignedHosts)
-    const { material } = loadOrCreateSelfSigned({ hosts, days: cfg.tlsCertMaxAgeDays })
-    const info = describeCert(material.cert)
+    const status = readSelfSignedStatus()
+    if (status === undefined) return 'self-signed (not generated yet — created when the listener starts)'
+    const info = describeCert(status.cert)
     return `self-signed [${info.subject}] exp ${info.validTo}`
   } catch (error) {
     return `self-signed (unavailable: ${error instanceof Error ? error.message : String(error)})`
   }
 }
-
-/** Whether `hostname` is loopback (127/8, localhost, ::1). */
-function isLoopbackHost(hostname: string): boolean {
-  if (hostname === 'localhost' || hostname === '[::1]' || hostname === '::1') return true
-  const parts = hostname.split('.')
-  return (
-    parts.length === 4
-    && parts[0] === '127'
-    && parts.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255)
-  )
-}
-
-const READ_ONLY_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
 
 /**
  * Same-origin loopback fence for the native `/lan-gateway/config` route. The
@@ -370,22 +387,105 @@ export function isTrustedConfigRequest(req: IncomingMessage): boolean {
   return true
 }
 
+/**
+ * Turn a submitted config patch into the next user section: only keys the card
+ * can edit, only real values, and `null` (or an emptied optional) removes the
+ * key rather than storing it.
+ *
+ * The patch is built from the *submitted* object, never from a schema call's
+ * output. Schemastery fills defaults into whatever it validates and passes
+ * unknown keys through, so deriving the section from `Config(submitted)` wrote
+ * `authRequired: true` (a capability that exists only to be refused) and any
+ * stray key into the user's settings on every save — and, because it also
+ * materialized `cookieName`, reset an operator's custom cookie name to the
+ * schema default.
+ *
+ * A `null` value is the card's clear: the key is dropped from the patch, which
+ * leaves it absent from the section, so it re-inherits the composition layer.
+ */
+export function buildConfigPatch(submitted: Record<string, unknown>): {
+  patch: Record<string, unknown>
+  clear: string[]
+  unknown: string[]
+} {
+  const patch: Record<string, unknown> = {}
+  const clear: string[] = []
+  const unknown: string[] = []
+  for (const [key, value] of Object.entries(submitted)) {
+    if (!CONFIG_FIELD_KEYS.has(key)) {
+      unknown.push(key)
+      continue
+    }
+    if (value === null || value === undefined) {
+      clear.push(key)
+      continue
+    }
+    if (typeof value === 'string' && value === '' && OPTIONAL_CONFIG_KEYS.has(key)) {
+      clear.push(key)
+      continue
+    }
+    // An empty string on a non-optional text field is a real value the card
+    // refuses to submit, but a hand-written POST could send one; let the schema
+    // reject it rather than inventing a meaning here.
+    patch[key] = value
+  }
+  return { patch, clear, unknown }
+}
+
 export function apply(ctx: Context, config: Config): void {
   let state = loadState()
   let gateway: LanGateway | undefined
   let startedWith: string | undefined
   let lastError: string | undefined
+  /**
+   * The operator's run intent, used only while no settings service is attached.
+   * With settings present, `enabled` in the settings section *is* the intent —
+   * the card and the tool write the same field, so there is one truth rather
+   * than two that disagree.
+   */
   let manualOverride: boolean | undefined
   /** Whether the base enforces browser-session auth; set once `connection` is seen. */
   let upstreamSessionAvailable = false
+  /**
+   * Identifies the current `connection` handler. A provider that detaches and a
+   * new one that attaches run their disposers in an order the plugin does not
+   * control, and a stale disposer clearing `makeRelay` would strand the live
+   * provider — so a disposer only acts if it is still the latest generation.
+   */
+  let connectionGeneration = 0
   /** Builds a fresh shared-session relay for a dsh port, once the base supports sessions. */
   let makeRelay: ((dshPort: number) => UpstreamSession) | undefined
   /** The authoritative config: settings section when attached, else composition. */
   let configSource: () => Config = () => config
-  /** Serializes listener start/stop/restart so settings changes cannot race. */
-  let syncing: Promise<void> = Promise.resolve()
+  /** Whether writes go to the settings section rather than staying in memory. */
+  let settingsAttached = false
+  /** The settings scope for the `lan-gateway` namespace, while one is attached. */
+  let settingsScope: SettingsScope<Config> | undefined
+  /**
+   * The settings provider, for the one write a scope cannot express: a section
+   * key must be *removed* to re-inherit the composition layer, and only the
+   * provider's path-addressed `mutate` can unset one.
+   */
+  let settingsProvider: SettingsProvider | undefined
+  /**
+   * One queue for every lifecycle side effect. Settings changes, tool commands,
+   * credential changes, TLS regeneration and plugin disposal all land here, so
+   * two of them can never interleave a stop with a start.
+   */
+  let lifecycle: Promise<void> = Promise.resolve()
+  /** Set by the dispose hook; a start that completes after it must undo itself. */
+  let disposed = false
 
   const effective = (): Config => configSource()
+
+  /** Queue one lifecycle action behind every action already running. */
+  const enqueue = (reason: string, action: () => Promise<void>): Promise<void> => {
+    lifecycle = lifecycle.then(action).catch((error: unknown) => {
+      lastError = error instanceof Error ? error.message : String(error)
+      ctx.logger.warn(`dsh-lan-gateway: ${reason}: ${lastError}`)
+    })
+    return lifecycle
+  }
 
   const startGateway = async (cfg: Config): Promise<void> => {
     if (gateway !== undefined) return
@@ -420,6 +520,13 @@ export function apply(ctx: Context, config: Config): void {
       },
     }, state)
     await next.listen()
+    // The listen above is asynchronous and the tree can be disposed while it is
+    // in flight. Publishing the listener after that would leave a socket owned
+    // by nobody — the dispose hook already ran and saw `gateway` undefined.
+    if (disposed) {
+      await next.close()
+      return
+    }
     gateway = next
     startedWith = listenerKey(cfg, makeRelay !== undefined)
     ctx.logger.info(
@@ -445,46 +552,70 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
 
+  /** The config the listener should be running under, intent included. */
+  const desiredConfig = (): Config => {
+    const cfg = effective()
+    // Without a settings service there is nowhere to record the tool's intent,
+    // so it lives in memory as an override on the composition entry. With one
+    // attached, `enabled` already carries it and an override would shadow the
+    // card — the defect this replaces.
+    if (settingsAttached) return cfg
+    return manualOverride === undefined ? cfg : { ...cfg, enabled: manualOverride }
+  }
+
   /** Reconcile the listener with the effective config (start/stop/restart). */
   const syncGateway = (reason: string): Promise<void> => {
-    syncing = syncing.then(async () => {
+    return enqueue(reason, async () => {
       lastError = undefined
-      const cfg = effective()
-      const shouldRun = manualOverride ?? cfg.enabled
-      try {
-        if (gateway === undefined) {
-          if (shouldRun) await startGateway(cfg)
-        } else if (!shouldRun) {
-          await stopGateway()
-        } else if (startedWith !== listenerKey(cfg, makeRelay !== undefined)) {
-          await stopGateway()
-          await startGateway(cfg)
-        }
-      } catch (error) {
-        lastError = error instanceof Error ? error.message : String(error)
-        ctx.logger.warn(`dsh-lan-gateway: ${reason}: ${lastError}`)
+      if (disposed) return
+      const cfg = desiredConfig()
+      if (gateway === undefined) {
+        if (cfg.enabled) await startGateway(cfg)
+      } else if (!cfg.enabled) {
+        await stopGateway()
+      } else if (startedWith !== listenerKey(cfg, makeRelay !== undefined)) {
+        await stopGateway()
+        await startGateway(cfg)
       }
     })
-    return syncing
+  }
+
+  /** Record the run intent where it will survive: the settings section, or memory. */
+  const setRunIntent = async (enabled: boolean): Promise<void> => {
+    if (settingsAttached && settingsScope !== undefined) {
+      // The same field the Settings card writes. A merge patch, so nothing else
+      // in the user's section is disturbed.
+      await settingsScope.update({ enabled })
+      // The section's watcher queues the reconcile; it observes committed
+      // changes, so waiting on it here would deadlock behind this same write.
+      return
+    }
+    manualOverride = enabled
   }
 
   // The tunables also live in the `lan-gateway` settings section: while the
   // settings service exists, the section (composition base + user overrides)
   // is the authoritative config, and every committed change re-syncs the
   // listener — so the Settings → Plugins page adjusts the gateway live.
-  // Registered directly (not via installSettingsSection) so the scope handle
-  // is available to the /lan-gateway/config route for writes.
-  let settingsScope: SettingsScope<Config> | undefined
+  // Registered directly (not via installSection) so the scope handle is
+  // available to the /lan-gateway/config route for writes.
   ctx.inject(['settings'], (sctx) => {
     const scope = sctx.settings.register(NS, Config, { base: config })
     settingsScope = scope
+    settingsProvider = sctx.settings
+    settingsAttached = true
     configSource = () => scope.get()
     sctx.effect(() => scope.watch(() => { void syncGateway('settings change') }))
     sctx.effect(() => () => {
-      // The settings provider went away (disposal / provider reload): fall
-      // back to the composition entry so the plugin keeps working as composed.
+      // The settings provider went away (disposal / provider reload): fall back
+      // to the composition entry so the plugin keeps working as composed, and
+      // reconcile so the listener follows the config that is now authoritative
+      // instead of staying on the section's last value.
       configSource = () => config
       settingsScope = undefined
+      settingsProvider = undefined
+      settingsAttached = false
+      void syncGateway('settings detach')
     })
     void syncGateway('settings attach')
   })
@@ -495,6 +626,7 @@ export function apply(ctx: Context, config: Config): void {
   // relay exchanges. Optional: on an older base the callback never runs, the
   // gateway forwards without a relay, and lanPasswordless stays refused.
   ctx.inject(['connection'], (ccx) => {
+    const generation = ++connectionGeneration
     upstreamSessionAvailable = true
     ctx.logger.info('dsh-lan-gateway: connection service attached; upstream session relay enabled')
     makeRelay = (dshPort) => new UpstreamSessionRelay({
@@ -503,6 +635,15 @@ export function apply(ctx: Context, config: Config): void {
       // The relay never throws, so a failing exchange is otherwise invisible
       // and looks exactly like a base with no browser sessions.
       log: (message) => ctx.logger.info(`dsh-lan-gateway relay: ${message}`),
+    })
+    ccx.effect(() => () => {
+      // The provider went away. Drop the relay factory rather than hold one
+      // bound to a disposed context, and let the listenerKey see the change so
+      // the running listener does not keep serving through a dead provider.
+      if (generation !== connectionGeneration) return
+      makeRelay = undefined
+      upstreamSessionAvailable = false
+      void syncGateway('connection detach')
     })
     // A listener that started before the connection service appeared must
     // restart so it picks up the relay (and the now-correct fail-closed facts).
@@ -516,6 +657,17 @@ export function apply(ctx: Context, config: Config): void {
   // reach it — a genuine local user, or a local process that could already read
   // ~/.dsh.
   const configRouteHandler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    const snapshot = (): Record<string, unknown> => {
+      const cfg = effective()
+      return {
+        config: cfg,
+        running: gateway !== undefined,
+        port: cfg.gatewayPort,
+        tls: tlsStatusLine(cfg),
+        upstreamSessionAvailable,
+        lastError: lastError ?? null,
+      }
+    }
     const send = (status: number, body: unknown): void => {
       res.writeHead(status, { 'content-type': 'application/json' })
       res.end(JSON.stringify(body))
@@ -525,15 +677,7 @@ export function apply(ctx: Context, config: Config): void {
       return
     }
     if (req.method === 'GET') {
-      const cfg = effective()
-      send(200, {
-        config: cfg,
-        running: gateway !== undefined,
-        port: cfg.gatewayPort,
-        tls: tlsStatusLine(cfg),
-        upstreamSessionAvailable,
-        lastError: lastError ?? null,
-      })
+      send(200, snapshot())
       return
     }
     if (req.method !== 'POST') {
@@ -553,20 +697,18 @@ export function apply(ctx: Context, config: Config): void {
       send(400, { error: 'body must be a config object' })
       return
     }
-    // The schema callable validates and fills defaults; it throws with a
-    // descriptive message on any invalid value.
-    let candidate: Config
-    try {
-      candidate = Config(submitted as Config)
-    } catch (error) {
-      send(400, { error: error instanceof Error ? error.message : String(error) })
-      return
-    }
-    if (settingsScope === undefined) {
+    if (settingsProvider === undefined) {
       send(409, { error: 'settings service unavailable — edit the profile patch (cordis.patch.yml) instead' })
       return
     }
-    // Fail the save early (before persisting) when the candidate is unusable.
+    // The patch names only the keys the card can edit; a clear is expressed by
+    // omitting the key from the patch, which is what `unset` does to the section
+    // as it stands. Unknown keys are reported rather than silently stored.
+    const { patch, clear, unknown } = buildConfigPatch(submitted as Record<string, unknown>)
+    // Validate the candidate the patch would produce — schema defaults included,
+    // exactly as the listener will resolve it — so the save fails closed on an
+    // unusable combination instead of persisting it.
+    const candidate = Config({ ...effective(), ...patch })
     // A structural problem (legacy authRequired:false, lanPasswordless without
     // a session-capable base) is invalid however it is reached; a start
     // condition (plaintext without TLS/terminator/opt-in) only blocks a save
@@ -579,28 +721,26 @@ export function apply(ctx: Context, config: Config): void {
       send(409, { error: `config cannot start: ${problems.join(' ')}` })
       return
     }
-    // Build the next user section: drop null/undefined and empty optionals
-    // (an empty path field re-inherits the composition layer).
-    const section: Record<string, unknown> = {}
-    for (const [key, value] of Object.entries(candidate)) {
-      if (value === null || value === undefined) continue
-      if (typeof value === 'string' && value === '' && OPTIONAL_CONFIG_KEYS.has(key)) continue
-      section[key] = value
-    }
     try {
-      await settingsScope.replace(section)
-      // Let the listener restart settle before reporting, so `running` is
-      // accurate instead of a mid-restart snapshot.
+      const ops = [
+        ...Object.entries(patch).map(([key, value]) => ({ op: 'set' as const, path: [key], value })),
+        ...clear.map(key => ({ op: 'unset' as const, path: [key] })),
+      ]
+      // Path-addressed edits, not a merge patch: a clear has to *remove* the
+      // key so it re-inherits the composition layer. Storing null instead would
+      // leave a null where the config expects a string, and `!== undefined`
+      // tests elsewhere would then read that null as a declared value.
+      if (ops.length > 0) await settingsProvider.mutate(NS, ops)
+      // The write commits through the section's watcher; reconcile explicitly so
+      // the response reports a settled listener rather than a mid-restart one.
       await syncGateway('config route save')
-      const cfg = effective()
-      send(200, {
-        config: cfg,
-        running: gateway !== undefined,
-        port: cfg.gatewayPort,
-        tls: tlsStatusLine(cfg),
-        upstreamSessionAvailable,
-        lastError: lastError ?? null,
-      })
+      const next = { ...snapshot() }
+      if (unknown.length > 0) {
+        // Not an error: an older client may post fields this build dropped. Say
+        // so rather than dropping them silently.
+        next['ignored'] = unknown
+      }
+      send(200, next)
     } catch (error) {
       send(409, { error: error instanceof Error ? error.message : String(error) })
     }
@@ -612,7 +752,7 @@ export function apply(ctx: Context, config: Config): void {
 
   const controller: GatewayController = {
     status(): ToolResult {
-      const cfg = effective()
+      const cfg = desiredConfig()
       const dshPort = cfg.dshTargetPort ?? ctx.webServer.port
       const encrypted = cfg.tlsEnabled || cfg.trustedTerminator !== undefined
       return {
@@ -627,21 +767,21 @@ export function apply(ctx: Context, config: Config): void {
           + `\n- upstream session relay: ${upstreamSessionAvailable ? 'active (dsh browser-session auth present)' : 'absent (older dsh base)'}`
           + `\n- ingress: ${cfg.tlsEnabled ? `TLS (${tlsStatusLine(cfg)})` : cfg.trustedTerminator !== undefined ? `trusted proxy (${cfg.trustedTerminator}, ${resolveSecureCookies(cfg) ? 'TLS' : 'plaintext'} browser ingress)` : encrypted ? 'encrypted' : cfg.allowInsecurePlaintext ? 'PLAINTEXT (explicit allowInsecurePlaintext)' : 'plaintext — will not start'}`
           + `\n- session cookie: ${cfg.cookieName}, ${cfg.cookieMaxAgeDays}d, ${resolveSecureCookies(cfg) ? 'Secure' : 'no Secure attribute (plaintext browser ingress)'}`
-          + (manualOverride !== undefined
+          + (manualOverride !== undefined && !settingsAttached
             ? `\n- manual override: ${manualOverride ? 'enabled' : 'disabled'}`
             : '')
           + (lastError !== undefined ? `\n- last error: ${lastError}` : ''),
       }
     },
     async enable(): Promise<ToolResult> {
-      manualOverride = true
+      await setRunIntent(true)
       await syncGateway('tool enable')
       return gateway !== undefined
         ? { ok: true, message: `Gateway enabled: listening on ${gateway.boundAddress()}` }
         : { ok: false, message: `Failed to enable gateway: ${lastError ?? 'unknown error'}` }
     },
     async disable(): Promise<ToolResult> {
-      manualOverride = false
+      await setRunIntent(false)
       await syncGateway('tool disable')
       return { ok: true, message: 'Gateway disabled.' }
     },
@@ -650,26 +790,29 @@ export function apply(ctx: Context, config: Config): void {
         return { ok: false, message: 'Password must be at least 8 characters.' }
       }
       const setting = password !== undefined && password.length > 0
-      const previous = state
-      state = setPassword(state, setting ? password : undefined)
+      const hadPassword = state.password !== undefined
+      state = await setPassword(state, setting ? password : undefined)
       saveState(state)
       gateway?.setState(state)
       if (!setting) {
         // Clearing the credential must not leave an open gateway serving
         // sessions the old password authorized: stop the listener. A password
         // is required to run, so a later enable fails closed.
-        manualOverride = false
-        if (gateway !== undefined) {
-          await stopGateway()
+        await setRunIntent(false)
+        return enqueue('password cleared', async () => {
+          if (gateway !== undefined) await stopGateway()
           lastError = 'Password cleared — the gateway listener was stopped (a password is required to run).'
-          void syncGateway('password cleared')
-        }
-        return {
+        }).then(() => ({
           ok: true,
           message: 'Password cleared. Session epoch advanced and the gateway listener was stopped — set a password before enabling it again.',
-        }
+        }))
       }
-      void (previous === undefined ? syncGateway('password set') : Promise.resolve())
+      // The first password turns a dormant "enabled but unpassworded" intent
+      // into a startable one, so reconcile: the listener was refused a moment
+      // ago for a reason that no longer holds. A later password change needs no
+      // reconcile (the listener is already running or already refused for some
+      // other reason), and reconciling anyway would be harmless but noisy.
+      if (!hadPassword) await syncGateway('password set')
       return {
         ok: true,
         message: 'Password set. Session epoch advanced — every previously issued session is now invalid; all sources must sign in again.',
@@ -697,29 +840,40 @@ export function apply(ctx: Context, config: Config): void {
       if (hosts.length === 0) {
         return { ok: false, message: 'tlsSelfSignedHosts must name at least one host (DNS name or IP).' }
       }
-      try {
-        regenerateSelfSigned({ hosts, days: cfg.tlsCertMaxAgeDays })
-        if (gateway !== undefined) {
-          await stopGateway()
-          await startGateway(effective())
+      let failure: string | undefined
+      // Through the queue like every other lifecycle action: minting the
+      // certificate and restarting must not interleave with a settings-driven
+      // restart, which is how two listeners ended up racing for one port.
+      await enqueue('tls regenerate', async () => {
+        try {
+          regenerateSelfSigned({ hosts, days: cfg.tlsCertMaxAgeDays })
+          if (gateway !== undefined) {
+            await stopGateway()
+            await startGateway(effective())
+          }
           lastError = undefined
+        } catch (error) {
+          failure = error instanceof Error ? error.message : String(error)
         }
-        return { ok: true, message: 'Self-signed certificate regenerated (new key). Listener restarted with the new certificate.' }
-      } catch (error) {
-        return {
-          ok: false,
-          message: `Failed to regenerate TLS certificate: ${error instanceof Error ? error.message : String(error)}`,
-        }
-      }
+      })
+      return failure === undefined
+        ? { ok: true, message: 'Self-signed certificate regenerated (new key). Listener restarted with the new certificate.' }
+        : { ok: false, message: `Failed to regenerate TLS certificate: ${failure}` }
     },
   }
 
   // Register the management tool once.
   ctx.tools.register(lanGatewayTool(controller))
 
-  // Own the gateway lifecycle with the cordis tree.
+  // Own the gateway lifecycle with the cordis tree. The dispose hook only marks
+  // the tree gone and queues the stop: everything that could be mid-flight is
+  // already holding the queue, and `startGateway` undoes its own listener when
+  // it notices the flag.
   ctx.effect(() => {
     void syncGateway('boot')
-    return stopGateway
+    return async () => {
+      disposed = true
+      await enqueue('dispose', stopGateway)
+    }
   }, 'dsh-lan-gateway: listener lifecycle')
 }

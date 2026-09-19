@@ -77,6 +77,13 @@ function normalizeAddress(raw: string): string {
 
 /**
  * Classify a source address string into one of the three trust tiers.
+ *
+ * The input is a *socket* address — `req.socket.remoteAddress`, unwrapped from
+ * its `::ffff:` mapping — which is a different domain from the URL hostname
+ * `isLoopbackHost` in `request-policy.ts` judges. The two agree on the common
+ * inputs but are not interchangeable: this one never sees `[::1]`, and that one
+ * never sees a mapped form. Both spans are documented where each lives.
+ *
  * @param remoteAddress - the raw value of `req.socket.remoteAddress`.
  * @param lanCidrs - CIDR strings treated as trusted LAN space (IPv4).
  * @returns the classification. IPv4-mapped IPv6 addresses are unwrapped.
@@ -189,20 +196,6 @@ export function verifySession(
   } catch {
     return undefined
   }
-}
-
-/**
- * Whether a cookie value is a valid, unexpired session signed with `secret`
- * and minted under `epoch`. Epoch-less cookies (legacy payloads) count as
- * epoch 0, so an upgrade from a pre-0.5.0 state does not log everyone out.
- */
-export function verifyCookie(
-  secret: string,
-  value: string | undefined,
-  now: number,
-  epoch: number = 0,
-): boolean {
-  return verifySession(secret, value, now, epoch) !== undefined
 }
 
 /**
