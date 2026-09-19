@@ -14,12 +14,9 @@ export const LOGIN_PATH = '/__login' as const
 /** Path the gateway owns and never forwards: signs the session out. */
 export const LOGOUT_PATH = '/__logout' as const
 
-/** The cookie name used for the signed session. */
-export const COOKIE_NAME = 'dsh_gw_auth' as const
-
 export interface LoginPageOptions {
   error?: string
-  /** Optional login attempt counter to show when rate-limited. */
+  /** The attempt was refused by the rate limiter, not by a wrong password. */
   limited?: boolean
 }
 
@@ -93,19 +90,6 @@ export function serveLoginGet(res: ServerResponse, extraHeaders: OutgoingHttpHea
     ...extraHeaders,
   })
   res.end(renderLoginPage())
-}
-
-/** Parse an application/x-www-form-urlencoded body into its fields. */
-export function parseFormBody(body: string): Record<string, string> {
-  const out: Record<string, string> = {}
-  for (const pair of body.split('&')) {
-    if (pair === '') continue
-    const eq = pair.indexOf('=')
-    const key = eq === -1 ? pair : pair.slice(0, eq)
-    const value = eq === -1 ? '' : pair.slice(eq + 1)
-    out[decodeURIComponent(key.replaceAll('+', ' '))] = decodeURIComponent(value.replaceAll('+', ' '))
-  }
-  return out
 }
 
 /** Read a request body up to a byte ceiling, rejecting anything larger. */

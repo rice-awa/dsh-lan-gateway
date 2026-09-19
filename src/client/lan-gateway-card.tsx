@@ -12,6 +12,14 @@
 
 import { useEffect, useState, type ChangeEvent, type ReactNode } from 'react'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import {
+  FIELDS,
+  TRISTATE_OPTIONS,
+  formatValue,
+  parseValue,
+  type FieldDef,
+  type LanGatewaySettings,
+} from '../config-fields.ts'
 
 /**
  * The official Settings → Plugins page declares the `settings.plugin.item`
@@ -27,27 +35,20 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   }
 }
 
-/** Props the renderer binds for this card (unused — the card is self-loading). */
+/**
+ * Props the renderer binds for this card (unused — the card is self-loading).
+ */
 export type LanGatewayCardProps = PropsRuntime<'settings.plugin.item'>
 
-/** The wire shape of the `lan-gateway` config section. */
-export interface LanGatewaySettings {
-  enabled?: boolean
-  gatewayPort?: number
-  dshTargetPort?: number
-  lanCidrs?: string[]
-  lanPasswordless?: boolean
-  cookieMaxAgeDays?: number
-  tlsEnabled?: boolean
-  tlsMode?: 'self-signed' | 'custom'
-  tlsCertPath?: string
-  tlsKeyPath?: string
-  tlsSelfSignedHosts?: string
-  tlsCertMaxAgeDays?: number
-  allowInsecurePlaintext?: boolean
-  trustedTerminator?: string
-  secureCookies?: boolean
-}
+/**
+ * The card's field table and value codecs live in `config-fields.ts`, shared
+ * with the host: the host's config route decides which submitted keys are
+ * editable and which empty value means "clear", and a table duplicated here
+ * would let the two disagree about a field the card can render but the route
+ * would refuse. Re-exported so the existing tests keep their import path.
+ */
+export { FIELDS, TRISTATE_OPTIONS, formatValue, parseValue }
+export type { FieldDef, LanGatewaySettings }
 
 /** GET /lan-gateway/config response. */
 interface RouteState {
@@ -70,7 +71,6 @@ interface Labels {
   saving: string
   discard: string
   reset: string
-  overridden: string
   readOnly: string
   saveFailed: string
   loadFailed: string
@@ -93,10 +93,9 @@ const LABELS: Record<'zh' | 'en', Labels> = {
     saving: '保存中…',
     discard: '放弃',
     reset: '重置',
-    overridden: '已覆盖',
-    readOnly: '网关设置当前不可用（读不到配置路由）。',
+    readOnly: '网关设置只能在宿主机本机打开 dsh web 时修改：配置路由仅监听回环地址，经网关远程访问的浏览器会被拒绝。远程请改用 lan_gateway 工具。',
     saveFailed: '保存未生效，请检查输入后重试。',
-    loadFailed: '加载网关配置失败。',
+    loadFailed: '无法读取网关配置',
     emptyMeansClear: '留空 = 使用默认',
     running: '运行中',
     stopped: '已停止',
@@ -115,7 +114,7 @@ const LABELS: Record<'zh' | 'en', Labels> = {
     'field.allowInsecurePlaintext': '允许明文 HTTP',
     'hint.allowInsecurePlaintext': '危险：关闭 TLS 或受信终止代理时仍启动监听，密码与会话将以明文传输',
     'field.trustedTerminator': '受信 TLS 终止代理',
-    'hint.trustedTerminator': '可选：声明前置代理标识，视为加密入口（如 nginx）。留空 = 未声明',
+    'hint.trustedTerminator': '可选：声明前置代理标识，视为加密入口（如 nginx）。留空 = 未声明。注意：登录限流以 TCP 源地址为键，代理之后所有浏览器共用一个额度（5 次/分钟）',
     'field.secureCookies': '会话 cookie 的 Secure 属性',
     'hint.secureCookies': '自动 = TLS 或已声明受信终止代理时加 Secure。受信代理只做明文鉴权、浏览器走 http 访问时须设为 false，否则浏览器拒收 Secure cookie，登录会无限弹回登录页',
     'opt.auto': '自动',
@@ -128,13 +127,13 @@ const LABELS: Record<'zh' | 'en', Labels> = {
     'field.tlsMode': '证书来源',
     'hint.tlsMode': 'self-signed = 自动生成自签名证书；custom = 使用自己的证书',
     'field.tlsSelfSignedHosts': '自签名证书域名/IP',
-    'hint.tlsSelfSignedHosts': '逗号分隔，写入证书 SAN，如 localhost, 192.168.1.5',
+    'hint.tlsSelfSignedHosts': '逗号分隔，写入证书 SAN，如 localhost, 192.168.1.5。仅影响下次换发：已有证书沿用至到期，改动不会立刻生效',
     'field.tlsCertPath': '证书文件路径（custom）',
     'hint.tlsCertPath': 'PEM 格式证书（或证书链）的绝对路径',
     'field.tlsKeyPath': '私钥文件路径（custom）',
     'hint.tlsKeyPath': '与证书配套的 PEM 私钥绝对路径',
     'field.tlsCertMaxAgeDays': '自签名证书有效期（天）',
-    'hint.tlsCertMaxAgeDays': '默认 825（约 27 个月）',
+    'hint.tlsCertMaxAgeDays': '默认 825（约 27 个月）。仅影响下次换发：已有证书沿用至到期',
   },
   en: {
     title: 'LAN Gateway',
@@ -144,10 +143,9 @@ const LABELS: Record<'zh' | 'en', Labels> = {
     saving: 'Saving…',
     discard: 'Discard',
     reset: 'Reset',
-    overridden: 'overridden',
-    readOnly: 'Gateway settings unavailable (config route unreachable).',
+    readOnly: 'Gateway settings can only be changed where dsh web runs locally: the config route listens on loopback only, so a browser reaching dsh through the gateway is refused. Use the lan_gateway tool remotely.',
     saveFailed: 'The save did not land — check the inputs and retry.',
-    loadFailed: 'Failed to load gateway configuration.',
+    loadFailed: 'Cannot read the gateway configuration',
     emptyMeansClear: 'Empty = default',
     running: 'Running',
     stopped: 'Stopped',
@@ -166,7 +164,7 @@ const LABELS: Record<'zh' | 'en', Labels> = {
     'field.allowInsecurePlaintext': 'Allow plaintext HTTP',
     'hint.allowInsecurePlaintext': 'Dangerous: start the listener even without TLS or a trusted terminator; passwords and sessions travel in clear',
     'field.trustedTerminator': 'Trusted TLS terminator',
-    'hint.trustedTerminator': 'Optional identifier for a front proxy (e.g. nginx) treated as the encrypted ingress. Empty = none declared',
+    'hint.trustedTerminator': 'Optional identifier for a front proxy (e.g. nginx) treated as the encrypted ingress. Empty = none declared. Note: login rate limiting keys on the TCP source address, so behind a proxy every browser shares one budget (5/min)',
     'field.secureCookies': 'Session cookie Secure attribute',
     'hint.secureCookies': 'Auto = Secure when TLS or a trusted terminator is declared. Set false when the trusted proxy only authenticates over plaintext and browsers reach it over http — otherwise browsers drop the Secure cookie and every login bounces back to the login page',
     'opt.auto': 'Auto',
@@ -179,106 +177,19 @@ const LABELS: Record<'zh' | 'en', Labels> = {
     'field.tlsMode': 'Certificate source',
     'hint.tlsMode': 'self-signed = auto-generated certificate; custom = your own files',
     'field.tlsSelfSignedHosts': 'Self-signed hosts (SANs)',
-    'hint.tlsSelfSignedHosts': 'Comma separated DNS/IP names, e.g. localhost, 192.168.1.5',
+    'hint.tlsSelfSignedHosts': 'Comma separated DNS/IP names, e.g. localhost, 192.168.1.5. Applies to the next issuance only: an existing certificate is reused until it expires',
     'field.tlsCertPath': 'Certificate path (custom)',
     'hint.tlsCertPath': 'Absolute path to a PEM certificate (or chain)',
     'field.tlsKeyPath': 'Private key path (custom)',
     'hint.tlsKeyPath': 'Absolute path to the matching PEM private key',
     'field.tlsCertMaxAgeDays': 'Self-signed validity (days)',
-    'hint.tlsCertMaxAgeDays': 'Default 825 (about 27 months)',
+    'hint.tlsCertMaxAgeDays': 'Default 825 (about 27 months). Applies to the next issuance only: an existing certificate is reused until it expires',
   },
 }
 
 function labels(): Labels {
   const lang = (typeof navigator !== 'undefined' ? navigator.language : 'en').toLowerCase()
   return lang.startsWith('zh') ? LABELS.zh : LABELS.en
-}
-
-/* ------------------------------------------------------------------ */
-/* Field model                                                         */
-/* ------------------------------------------------------------------ */
-
-type FieldKind = 'boolean' | 'number' | 'text' | 'cidrs' | 'select' | 'tristate'
-
-interface FieldDef {
-  field: keyof LanGatewaySettings
-  kind: FieldKind
-  optional?: boolean
-  options?: readonly string[]
-}
-
-/**
- * The card's field table and its two value codecs are exported for tests: the
- * tri-state codec is the load-bearing part of the settings round-trip (an
- * unset value must stay distinguishable from an explicit false, or the
- * plaintext-proxy escape hatch silently reverts).
- */
-export { TRISTATE_OPTIONS, FIELDS, formatValue, parseValue }
-export type { FieldDef, Write }
-
-/** The three states of a tri-state field, in display order. */
-const TRISTATE_OPTIONS = ['auto', 'true', 'false'] as const
-
-const FIELDS: readonly FieldDef[] = [
-  { field: 'enabled', kind: 'boolean' },
-  { field: 'gatewayPort', kind: 'number' },
-  { field: 'dshTargetPort', kind: 'number', optional: true },
-  { field: 'lanCidrs', kind: 'cidrs' },
-  { field: 'lanPasswordless', kind: 'boolean' },
-  { field: 'cookieMaxAgeDays', kind: 'number' },
-  { field: 'tlsEnabled', kind: 'boolean' },
-  { field: 'tlsMode', kind: 'select', options: ['self-signed', 'custom'] },
-  { field: 'tlsSelfSignedHosts', kind: 'text' },
-  { field: 'tlsCertPath', kind: 'text', optional: true },
-  { field: 'tlsKeyPath', kind: 'text', optional: true },
-  { field: 'tlsCertMaxAgeDays', kind: 'number' },
-  { field: 'allowInsecurePlaintext', kind: 'boolean' },
-  { field: 'trustedTerminator', kind: 'text', optional: true },
-  { field: 'secureCookies', kind: 'tristate' },
-]
-
-function formatValue(def: FieldDef, value: unknown): string {
-  switch (def.kind) {
-    case 'boolean': return value === true ? 'true' : 'false'
-    case 'number': return typeof value === 'number' ? String(value) : ''
-    case 'cidrs': return Array.isArray(value) ? value.join(', ') : ''
-    case 'select': return typeof value === 'string' ? value : (def.options?.[0] ?? '')
-    // Tri-state: an unset value is a distinct third state ("auto"), never "false".
-    case 'tristate': return value === true ? 'true' : value === false ? 'false' : 'auto'
-    case 'text': return typeof value === 'string' ? value : ''
-  }
-}
-
-type Write = { kind: 'set'; value: unknown } | { kind: 'clear' }
-
-/** Parse draft text into a value for the POST body; undefined blocks saving. */
-function parseValue(def: FieldDef, text: string): Write | undefined {
-  const trimmed = text.trim()
-  switch (def.kind) {
-    case 'boolean':
-      if (trimmed === 'true') return { kind: 'set', value: true }
-      if (trimmed === 'false') return { kind: 'set', value: false }
-      return undefined
-    case 'number':
-      if (trimmed === '') return def.optional ? { kind: 'clear' } : undefined
-      if (!/^\d+$/.test(trimmed)) return undefined
-      return { kind: 'set', value: Number(trimmed) }
-    case 'cidrs': {
-      const cidrs = trimmed.split(',').map(s => s.trim()).filter(s => s !== '')
-      return cidrs.length === 0 ? { kind: 'clear' } : { kind: 'set', value: cidrs }
-    }
-    case 'select':
-      return def.options?.includes(trimmed) ? { kind: 'set', value: trimmed } : undefined
-    case 'tristate':
-      // 'auto' clears the key so it re-inherits the composition layer (and the
-      // resolution rule), which is what an unset tri-state means.
-      if (trimmed === 'auto') return { kind: 'clear' }
-      if (trimmed === 'true') return { kind: 'set', value: true }
-      if (trimmed === 'false') return { kind: 'set', value: false }
-      return undefined
-    case 'text':
-      return trimmed === '' ? (def.optional ? { kind: 'clear' } : undefined) : { kind: 'set', value: trimmed }
-  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -314,7 +225,26 @@ export function LanGatewayCard(_props: LanGatewayCardProps): ReactNode {
     return () => { cancelled = true }
   }, [])
 
-  if (loadFailed) return null
+  // A remote browser reaches this card through the gateway, which answers 403
+  // for the plugin's own prefix by design, so the route is unreachable exactly
+  // where a user is most likely to go looking for the setting. Rendering
+  // nothing left them with a blank entry and no way to tell a missing card from
+  // a broken one; say what is wrong and where the card does work instead.
+  if (loadFailed) {
+    return (
+      <li style={styles.card}>
+        <div style={styles.header}>
+          <span style={styles.headerTop}>
+            <span style={styles.name}>{t.title}</span>
+          </span>
+          <span style={styles.description}>{t.loadFailed}</span>
+        </div>
+        <div style={styles.body}>
+          <p style={styles.hint}>{t.readOnly}</p>
+        </div>
+      </li>
+    )
+  }
   if (route === null) return null
 
   const { config } = route
@@ -352,18 +282,22 @@ export function LanGatewayCard(_props: LanGatewayCardProps): ReactNode {
     setSaving(true)
     setFailed(null)
     try {
-      // Build the next full config: the loaded one with drafts applied.
-      const next: Record<string, unknown> = {}
-      for (const def of FIELDS) {
-        const text = drafts[def.field] ?? formatValue(def, config[def.field])
-        const write = parseValue(def, text)
+      // A patch of the edited fields only, never the whole config: the card
+      // cannot express every key the section may hold (a custom `cookieName`,
+      // say), and posting a synthesized full config made the route treat those
+      // keys as submitted — resetting each one to its schema default.
+      const patch: Record<string, unknown> = {}
+      for (const [field, text] of Object.entries(drafts)) {
+        const def = FIELDS.find(f => f.field === field)
+        if (def === undefined) continue
+        const write = parseValue(def, text ?? '')
         if (write === undefined) continue
-        next[def.field] = write.kind === 'clear' ? null : write.value
+        patch[field] = write.kind === 'clear' ? null : write.value
       }
       const response = await fetch('/lan-gateway/config', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(next),
+        body: JSON.stringify(patch),
       })
       const body = await response.json().catch(() => ({})) as Partial<RouteState> & { error?: string }
       if (!response.ok) {

@@ -22,8 +22,12 @@ import { LanGateway } from '../../src/gateway.ts'
 import { setPassword, type GatewayState } from '../../src/state.ts'
 import type { UpstreamSession } from '../../src/upstream-session.ts'
 
-/** A state with a known password, ready to run a gateway. */
-function authedState(): GatewayState {
+/**
+ * A state with a known password, ready to run a gateway. Hashing is
+ * deliberately off the event loop now, so this is async — every call site
+ * awaits it.
+ */
+async function authedState(): Promise<GatewayState> {
   return setPassword({ cookieSecret: 's'.repeat(32), sessionEpoch: 0 }, 'correct horse battery')
 }
 
@@ -180,7 +184,7 @@ afterEach(() => {
 describe('LanGateway end-to-end against a fake upstream', () => {
   it('row 1: a loopback source with no session is bounced to /__login, nothing forwarded', async () => {
     const upstream = await createUpstream()
-    const { gateway, port } = await startGateway(authedState(), upstream, { source: 'loopback' })
+    const { gateway, port } = await startGateway(await authedState(), upstream, { source: 'loopback' })
     try {
       const res = await req(port, 'GET', '/')
       expect(res.status).toBe(302)
@@ -195,7 +199,7 @@ describe('LanGateway end-to-end against a fake upstream', () => {
   it('rows 2–3: LAN and internet sources with no session are bounced to /__login by default', async () => {
     for (const source of ['lan', 'internet'] as const) {
       const upstream = await createUpstream()
-      const { gateway, port } = await startGateway(authedState(), upstream, { source })
+      const { gateway, port } = await startGateway(await authedState(), upstream, { source })
       try {
         const res = await req(port, 'GET', '/')
         expect(res.status).toBe(302)
@@ -210,7 +214,7 @@ describe('LanGateway end-to-end against a fake upstream', () => {
 
   it('row 4: lanPasswordless lets a LAN source straight through, but only LAN', async () => {
     const upstream = await createUpstream()
-    const { gateway, port } = await startGateway(authedState(), upstream, {
+    const { gateway, port } = await startGateway(await authedState(), upstream, {
       lanPasswordless: true,
       source: 'lan',
     })
@@ -226,7 +230,7 @@ describe('LanGateway end-to-end against a fake upstream', () => {
 
     // The same exemption must NOT extend to internet sources.
     const upstream2 = await createUpstream()
-    const { gateway: gw2, port: port2 } = await startGateway(authedState(), upstream2, {
+    const { gateway: gw2, port: port2 } = await startGateway(await authedState(), upstream2, {
       lanPasswordless: true,
       source: 'internet',
     })
@@ -242,7 +246,7 @@ describe('LanGateway end-to-end against a fake upstream', () => {
 
   it('row 6: a valid session cannot ride a cross-site Origin', async () => {
     const upstream = await createUpstream()
-    const { gateway, port } = await startGateway(authedState(), upstream, { source: 'internet' })
+    const { gateway, port } = await startGateway(await authedState(), upstream, { source: 'internet' })
     try {
       const issued = await login(port, 'correct horse battery')
       expect(issued.status).toBe(302)
@@ -259,7 +263,7 @@ describe('LanGateway end-to-end against a fake upstream', () => {
 
   it('row 7: an upgrade without a same-site Origin is refused even with a session', async () => {
     const upstream = await createUpstream()
-    const { gateway, port } = await startGateway(authedState(), upstream, { source: 'internet' })
+    const { gateway, port } = await startGateway(await authedState(), upstream, { source: 'internet' })
     try {
       const issued = await login(port, 'correct horse battery')
       const jar = cookieJar(issued.headers)
@@ -281,7 +285,7 @@ describe('LanGateway end-to-end against a fake upstream', () => {
 
   it('row 7b: an unauthorized upgrade is refused with 401, not forwarded', async () => {
     const upstream = await createUpstream()
-    const { gateway, port } = await startGateway(authedState(), upstream, { source: 'internet' })
+    const { gateway, port } = await startGateway(await authedState(), upstream, { source: 'internet' })
     try {
       const res = await rawUpgrade(port, '/api/remote.mux', { origin: `http://127.0.0.1:${port}` })
       expect(res).toMatch(/^HTTP\/1\.1 401 /)
@@ -294,7 +298,7 @@ describe('LanGateway end-to-end against a fake upstream', () => {
 
   it('row 8: an API path is session-gated too (no passwordless prefix survives)', async () => {
     const upstream = await createUpstream()
-    const { gateway, port } = await startGateway(authedState(), upstream, { source: 'internet' })
+    const { gateway, port } = await startGateway(await authedState(), upstream, { source: 'internet' })
     try {
       const res = await req(port, 'GET', '/api/chat')
       expect(res.status).toBe(302)
@@ -307,7 +311,7 @@ describe('LanGateway end-to-end against a fake upstream', () => {
 
   it('row 9: the owned /lan-gateway/config prefix is refused even with a session and never reaches upstream', async () => {
     const upstream = await createUpstream()
-    const { gateway, port } = await startGateway(authedState(), upstream, { source: 'internet' })
+    const { gateway, port } = await startGateway(await authedState(), upstream, { source: 'internet' })
     try {
       const issued = await login(port, 'correct horse battery')
       const jar = cookieJar(issued.headers)
@@ -323,7 +327,7 @@ describe('LanGateway end-to-end against a fake upstream', () => {
 
   it('row 9b: a dot-segment spelling of the owned path is refused too, on HTTP and WS', async () => {
     const upstream = await createUpstream()
-    const { gateway, port } = await startGateway(authedState(), upstream, { source: 'internet' })
+    const { gateway, port } = await startGateway(await authedState(), upstream, { source: 'internet' })
     try {
       const issued = await login(port, 'correct horse battery')
       const jar = cookieJar(issued.headers)
@@ -356,7 +360,7 @@ describe('LanGateway end-to-end against a fake upstream', () => {
 
   it('row 9c: normalization does not over-block — an ordinary path still relays verbatim', async () => {
     const upstream = await createUpstream()
-    const { gateway, port } = await startGateway(authedState(), upstream, { source: 'internet' })
+    const { gateway, port } = await startGateway(await authedState(), upstream, { source: 'internet' })
     try {
       const issued = await login(port, 'correct horse battery')
       const jar = cookieJar(issued.headers)
@@ -372,7 +376,7 @@ describe('LanGateway end-to-end against a fake upstream', () => {
 
   it('row 9d: a trailing slash does not route the gateway\'s own surfaces into the relay', async () => {
     const upstream = await createUpstream()
-    const { gateway, port } = await startGateway(authedState(), upstream, { source: 'internet' })
+    const { gateway, port } = await startGateway(await authedState(), upstream, { source: 'internet' })
     try {
       // The login page, not dsh's single-page fallback.
       const form = await req(port, 'GET', '/__login/')
@@ -405,7 +409,7 @@ describe('LanGateway end-to-end against a fake upstream', () => {
 
   it('signing out revokes the session that signed out, and only that one', async () => {
     const upstream = await createUpstream()
-    const { gateway, port } = await startGateway(authedState(), upstream, { source: 'internet' })
+    const { gateway, port } = await startGateway(await authedState(), upstream, { source: 'internet' })
     try {
       const first = await login(port, 'correct horse battery')
       const second = await login(port, 'correct horse battery')
@@ -439,7 +443,7 @@ describe('LanGateway end-to-end against a fake upstream', () => {
 
   it('signing out without a session is a no-op, not an error', async () => {
     const upstream = await createUpstream()
-    const { gateway, port } = await startGateway(authedState(), upstream, { source: 'internet' })
+    const { gateway, port } = await startGateway(await authedState(), upstream, { source: 'internet' })
     try {
       const out = await req(port, 'POST', LOGOUT, { origin: `http://127.0.0.1:${port}` })
       expect(out.status).toBe(302)
@@ -456,7 +460,7 @@ describe('LanGateway end-to-end against a fake upstream', () => {
     // over either.
     if (!await ipv6Available()) ctx.skip()
     const upstream = await createUpstream()
-    const { gateway, port } = await startGateway(authedState(), upstream, { source: 'internet' })
+    const { gateway, port } = await startGateway(await authedState(), upstream, { source: 'internet' })
     try {
       const res = await req(port, 'GET', '/', { host: '::1' })
       expect(res.status).toBe(302)
@@ -470,7 +474,7 @@ describe('LanGateway end-to-end against a fake upstream', () => {
 
   it('row 12: a correct login mints a session cookie with the right attributes and forwards', async () => {
     const upstream = await createUpstream()
-    const { gateway, port } = await startGateway(authedState(), upstream, {
+    const { gateway, port } = await startGateway(await authedState(), upstream, {
       source: 'internet',
       secureCookies: true,
     })
@@ -502,7 +506,7 @@ describe('LanGateway end-to-end against a fake upstream', () => {
 
   it('row 12b: over plaintext (no Secure), the cookie omits Secure but keeps the rest', async () => {
     const upstream = await createUpstream()
-    const { gateway, port } = await startGateway(authedState(), upstream, {
+    const { gateway, port } = await startGateway(await authedState(), upstream, {
       source: 'internet',
       secureCookies: false,
     })
@@ -520,7 +524,7 @@ describe('LanGateway end-to-end against a fake upstream', () => {
 
   it('row 12c: wrong password is refused with 401 and the account rate-limits after 5 tries', async () => {
     const upstream = await createUpstream()
-    const { gateway, port } = await startGateway(authedState(), upstream, { source: 'internet' })
+    const { gateway, port } = await startGateway(await authedState(), upstream, { source: 'internet' })
     try {
       for (let attempt = 1; attempt <= 5; attempt += 1) {
         const bad = await login(port, 'not the password')
@@ -536,7 +540,7 @@ describe('LanGateway end-to-end against a fake upstream', () => {
 
   it('row 6b: a state-changing forwarded request without an Origin is refused even with a session', async () => {
     const upstream = await createUpstream()
-    const { gateway, port } = await startGateway(authedState(), upstream, { source: 'internet' })
+    const { gateway, port } = await startGateway(await authedState(), upstream, { source: 'internet' })
     try {
       const issued = await login(port, 'correct horse battery')
       const jar = cookieJar(issued.headers)
@@ -555,7 +559,7 @@ describe('LanGateway end-to-end against a fake upstream', () => {
 
   it('row 12d: a read-only request with no Origin but a valid session is forwarded (navigation-like)', async () => {
     const upstream = await createUpstream()
-    const { gateway, port } = await startGateway(authedState(), upstream, { source: 'internet' })
+    const { gateway, port } = await startGateway(await authedState(), upstream, { source: 'internet' })
     try {
       const issued = await login(port, 'correct horse battery')
       const jar = cookieJar(issued.headers)
@@ -570,7 +574,7 @@ describe('LanGateway end-to-end against a fake upstream', () => {
 
   it('row 13: bumping the session epoch immediately invalidates issued cookies', async () => {
     const upstream = await createUpstream()
-    let state = authedState()
+    let state = await authedState()
     const gateway = new LanGateway({
       gatewayPort: 0,
       dshPort: upstream.port,
@@ -606,11 +610,10 @@ describe('LanGateway end-to-end against a fake upstream', () => {
     const upstream = await createUpstream()
     const invalidate = vi.fn()
     const session: UpstreamSession = {
-      peek: () => 'dsh-auth-abc123=relayed-session',
       cookie: async () => 'dsh-auth-abc123=relayed-session',
       invalidate,
     }
-    const { gateway, port } = await startGateway(authedState(), upstream, {
+    const { gateway, port } = await startGateway(await authedState(), upstream, {
       source: 'internet',
       upstreamSession: session,
     })
@@ -640,11 +643,10 @@ describe('LanGateway end-to-end against a fake upstream', () => {
   it('a client-held dsh-auth cookie cannot shadow the relayed session', async () => {
     const upstream = await createUpstream()
     const session: UpstreamSession = {
-      peek: () => 'dsh-auth-abc123=relayed-session',
       cookie: async () => 'dsh-auth-abc123=relayed-session',
       invalidate: vi.fn(),
     }
-    const { gateway, port } = await startGateway(authedState(), upstream, {
+    const { gateway, port } = await startGateway(await authedState(), upstream, {
       source: 'internet',
       upstreamSession: session,
     })
@@ -670,7 +672,7 @@ describe('LanGateway end-to-end against a fake upstream', () => {
 
   it('withholds the upstream session cookie from relayed responses, keeps other cookies', async () => {
     const upstream = await createUpstream()
-    const { gateway, port } = await startGateway(authedState(), upstream, { source: 'internet' })
+    const { gateway, port } = await startGateway(await authedState(), upstream, { source: 'internet' })
     try {
       const issued = await login(port, 'correct horse battery')
       const jar = cookieJar(issued.headers)
@@ -703,7 +705,7 @@ describe('LanGateway end-to-end against a fake upstream', () => {
 
   it('does not relay client-supplied forwarding headers upstream', async () => {
     const upstream = await createUpstream()
-    const { gateway, port } = await startGateway(authedState(), upstream, { source: 'internet' })
+    const { gateway, port } = await startGateway(await authedState(), upstream, { source: 'internet' })
     try {
       const issued = await login(port, 'correct horse battery')
       const jar = cookieJar(issued.headers)
@@ -730,7 +732,7 @@ describe('LanGateway end-to-end against a fake upstream', () => {
 
   it('forwards without any session when no upstreamSession is wired (older base)', async () => {
     const upstream = await createUpstream()
-    const { gateway, port } = await startGateway(authedState(), upstream, { source: 'internet' })
+    const { gateway, port } = await startGateway(await authedState(), upstream, { source: 'internet' })
     try {
       const issued = await login(port, 'correct horse battery')
       const jar = cookieJar(issued.headers)

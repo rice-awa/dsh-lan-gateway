@@ -1,5 +1,25 @@
 # 更新日志
 
+## 0.5.5
+
+一轮架构复审的修复，覆盖 C1–C6 / D1–D14。与 0.5.4 的 G 系列不同，这一轮既有行为缺陷，也有结构清理：请求判定从 `LanGateway` 中拆出，配置契约收敛到一处，运行意图不再有两个真相源。
+
+**会话与生命周期缺陷（P1）。** 改密码时，`handleLogin` 会在 scrypt 校验**之前**读取代次，校验用掉的时间里代次若已前进，登录仍按旧代次签发 cookie，等于为一次已作废的凭据发了一张新票。现在登录前后各取一次代次，不一致即拒绝签发。WebSocket 握手同理：握手在途时改密或 `disable`，此前那条连接仍会 splice，销毁流程追不到它。现在 splice 前后各检查一次代次与关闭标志，中途作废的连接直接关闭。
+
+**运行意图统一到一个写入点。** 此前「网关是否该跑」有两个真相源：卡片写的 `enabled` 与工具 `enable` / `disable` 写的 `manualOverride`，后者存在时压过前者且永不复位。后果是工具启用过的网关，卡片关不掉；卡片启用的网关，工具关掉后重启又回来了。现在 `setRunIntent` 是唯一入口：settings 服务挂载时写 `enabled` 字段（卡片也写这个字段），未挂载时才退回内存标志。首设密码也不再让「待启用」的意图卡死——凭证补齐后按同一意图重新 reconcile，未表达过意图则不启动。
+
+**配置保存改为字段补丁。** 卡片此前提交整份表单，服务端按 schema 校验后整体替换 settings section。这会把 schema 默认值写进用户 section，让它们从此压过组合层——`cookieName` 就是这样被重置的：组合层里自定义的 cookie 名，只要在卡片上改了任何一个无关字段，就回落到 `dsh_gw_auth`，已有登录 cookie 全部失效。未知键同样被写进 section。现在保存走 `mutate` 的 `set` / `unset`：只写提交过的字段，空值走 `unset` 使其重新继承组合层，未知键被丢弃并在响应里列出。
+
+**登录 POST 纳入同站围栏。** 此前只有转发路径校验 Origin，签发会话的登录不校验——跨站表单可以消耗受害者来源地址的登录额度。登录用一套更宽的规则 `loginOriginAllowed`：仍接纳不带 Origin 的 curl / CLI 提交，但拒绝 `Sec-Fetch-Site: cross-site` 与和 Host 不符的 Origin。
+
+**上游会话中继的 WebSocket 错误路径。** 上游以非 101 应答握手时（例如会话已失效返回 401），node 既不触发 `upgrade` 也不触发 `error`，客户端挂在一个永远不会应答的 socket 上。现在非 101 直接回给客户端，并在 401 时丢弃中继会话，否则一个只走 WebSocket 重连的底座会永远重放一条死会话。
+
+**结构清理。** 请求判定（路径归一化、归属前缀、登录与同站围栏、三个头部变换）移入 `src/request-policy.ts`，成为对字面 `RequestHead` 的纯函数，可脱离 socket 测试；`LanGateway` 只保留 socket、生命周期与 splice。卡片字段模型移入零依赖的 `src/config-fields.ts`，host 侧由它派生 `OPTIONAL_CONFIG_KEYS` 与 `CONFIG_FIELD_KEYS`，「哪些键存在」与「哪些键空了要清」不再各有副本。`UpstreamSession.peek()` 删除，头部改写不再为「响亮拒绝」多绕一步。生命周期副作用全部走串行队列，配置保存、改密与工具调用不再可能交错。
+
+**其余修复。** `setPassword` 改用异步 scrypt，不再阻塞与 dsh 共用的事件循环（`state.ts` 的该函数因此变成异步）。状态查询不再有写副作用：`tlsStatusLine` 此前调用 `loadOrCreateSelfSigned`，网关停用、证书又不存在时，一次 `status` 就会生成 RSA 密钥并写盘；现在用只读的 `readSelfSignedStatus`。删除死代码：`parseFormBody`、`verifyCookie`、`COOKIE_NAME`，以及 `limited` 的三段未接线路径（限流拒绝现在直接在 POST 上渲染提示，不再经 `?limited=1` 绕一圈）。`revokeSession` 改为接受注入时钟，与其他时间边界函数一致。`READ_ONLY_METHODS` 与配置保存的跨站判定合并到 `request-policy.ts` 一处。
+
+**测试面。** 新增 `tests/request-policy.test.ts`（判定缝的纯函数覆盖）、`tests/integration/management-plane.test.ts`（真实 `apply()` + 真实 `SettingsProvider`，覆盖工具与卡片交替启停、未编辑字段与未知键的保留、清空后继承、拒绝不可启动配置）、`tests/integration/session-races.test.ts`（改密落在登录与握手途中的竞态，以及上游非 101 应答）。`process.env.HOME` 在测试内重定向到临时目录，`state.ts` 与 `tls.ts` 都在调用时解析 `homedir()`，因此测试不再触碰插件真实文件。测试总数 117 → 186。
+
 ## 0.5.4
 
 一轮针对 0.5.x 实现细节的代码复审修复，清单见 [docs/security/audit-2026-09-19-fix-list.md](docs/security/audit-2026-09-19-fix-list.md)。八项来自 G1–G8（四项与上游会话设计耦合，四项为独立的小缺陷），另四项为复审时记录、发布前重新评估后一并处理的条目（G9–G12）。

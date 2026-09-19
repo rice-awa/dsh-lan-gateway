@@ -110,10 +110,13 @@ describe('UpstreamSessionRelay', () => {
     const name = `dsh-auth-${createHash('sha256').update(upstream.authority).digest('base64url')}`
 
     expect(await relay.cookie()).toBe(`${name}=v1.payload.sig`)
-    expect(relay.peek()).toBe(`${name}=v1.payload.sig`)
+    // A second call is served from the held session rather than a new exchange,
+    // which is the whole point of caching it.
+    expect(await relay.cookie()).toBe(`${name}=v1.payload.sig`)
     // The exchange is a browser-equivalent visit of the launch-token URL, with
     // upstream's own authority as Host — the authority the cookie is bound to.
     expect(upstream.seen[0]).toEqual({ url: '/?token=launch-token', host: upstream.authority })
+    expect(upstream.seen).toHaveLength(1)
   })
 
   it('ignores a Set-Cookie that is not the upstream session', async () => {
@@ -121,7 +124,6 @@ describe('UpstreamSessionRelay', () => {
     const relay = relayFor(upstream)
 
     expect(await relay.cookie()).toBeUndefined()
-    expect(relay.peek()).toBeUndefined()
   })
 
   it('returns undefined when the exchange is refused and re-acquires later', async () => {
@@ -146,8 +148,9 @@ describe('UpstreamSessionRelay', () => {
 
     expect(await relay.cookie()).toBe(`${name}=v1.payload.sig`)
     relay.invalidate()
-    expect(relay.peek()).toBeUndefined()
 
+    // Nothing is held any more, so the next call has to exchange again — the
+    // seen-length assertion below is what proves it did.
     upstream.value = 'v1.rotated.sig'
     expect(await relay.cookie()).toBe(`${name}=v1.rotated.sig`)
     expect(upstream.seen).toHaveLength(2)

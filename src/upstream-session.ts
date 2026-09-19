@@ -35,10 +35,14 @@ interface HeldCookie {
   expiresAt: number
 }
 
-/** The minimal shared-session contract the gateway consumes. */
+/**
+ * The minimal shared-session contract the gateway consumes.
+ *
+ * Two methods, and deliberately no reader: a caller that needs the value
+ * already holds the one `cookie()` returned, and a second way to read the
+ * cache only invites the caller to skip the acquisition it just awaited.
+ */
 export interface UpstreamSession {
-  /** The current `name=value` without triggering a re-acquisition. */
-  peek(): string | undefined
   /** The current `name=value`, re-acquiring when missing or stale. Never throws. */
   cookie(): Promise<string | undefined>
   /** Forget a session upstream rejected, so the next request re-acquires. */
@@ -93,13 +97,29 @@ function cookieNameOf(setCookie: string): string {
 }
 
 /**
+ * Whether one `name=value` fragment of a request `Cookie` header names the
+ * upstream session namespace, and so must be dropped before the relay's own
+ * copy is appended. This is the *filter* rule: it matches the whole reserved
+ * namespace, name only, whether or not the pair is a well-formed session.
+ */
+export function isUpstreamCookiePair(pair: string): boolean {
+  return pair.trim().startsWith(UPSTREAM_COOKIE_PREFIX)
+}
+
+/**
  * Whether a `Set-Cookie` string is the upstream browser-session cookie. The
  * name upstream mints is `dsh-auth-<base64url(sha256(authority))>`: the prefix
  * is followed by the authority hash, never by `=` itself, so the test is a
  * prefix plus at least one character — matching on `dsh-auth-=` finds nothing
  * and silently relays every request anonymously.
+ *
+ * This is the *accept* rule, and it is stricter than {@link isUpstreamCookiePair}
+ * on purpose: filtering drops a whole namespace the gateway owns, whereas
+ * accepting a session has to recognize the one cookie upstream actually mints.
+ * Both live here because this module owns the protocol fact; a consumer that
+ * re-derives it is how the two rules drifted apart before.
  */
-function isUpstreamSessionCookie(setCookie: string): boolean {
+export function isUpstreamSessionCookie(setCookie: string): boolean {
   const name = cookieNameOf(setCookie)
   return name.startsWith(UPSTREAM_COOKIE_PREFIX) && name.length > UPSTREAM_COOKIE_PREFIX.length
 }
@@ -206,10 +226,6 @@ export class UpstreamSessionRelay implements UpstreamSession {
     // Refresh up to a minute before the cookie actually lapses so a slow
     // request is never rejected mid-flight by an expiring session.
     return Date.now() < held.expiresAt - 60_000
-  }
-
-  peek(): string | undefined {
-    return this.held?.header
   }
 
   invalidate(): void {

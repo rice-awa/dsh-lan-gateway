@@ -15,10 +15,9 @@
  *   or its login/logout paths; those are handled locally or refused.
  * - Because this gateway rewrites Origin to loopback, dsh's own CSRF fence is
  *   blinded — so the gateway runs its own origin check on every relayed
- *   request (HTTP and WebSocket upgrade) BEFORE rewriting: reject
- *   `sec-fetch-site: cross-site`, reject any Origin that does not name the
- *   gateway authority the browser actually used, and require an Origin on
- *   state-changing methods and on every WebSocket upgrade.
+ *   request (HTTP and WebSocket upgrade) BEFORE rewriting. See
+ *   `request-policy.ts`, which owns that decision along with every other
+ *   header/path/server decision; this module owns the transport.
  * - Against a session-capable dsh base the Host/Origin rewrite alone would
  *   still earn a 401 (dsh no longer trusts a loopback Host; it demands its own
  *   authority-bound session cookie). The gateway therefore relays one shared
@@ -38,7 +37,6 @@ import { randomBytes } from 'node:crypto'
 import type { Duplex } from 'node:stream'
 import {
   classifySource,
-  originMatchesHost,
   RateLimiter,
   signCookie,
   verifySession,
@@ -53,6 +51,17 @@ import {
   serveLoginGet,
   type LoginPageOptions,
 } from './login.ts'
+import {
+  downstreamResponseHeaders,
+  isOwnedPath,
+  loginOriginAllowed,
+  pathOf,
+  requiresLogin,
+  sameSiteAllowed,
+  sessionCookie,
+  upgradeResponseHeaders,
+  upstreamRequestHeaders,
+} from './request-policy.ts'
 import {
   isSessionRevoked,
   revokeSession,
@@ -95,100 +104,20 @@ const DEFAULT_BODY_LIMIT_BYTES = 64 * 1024
 const LOGIN_ATTEMPTS_LIMIT = 5
 const LOGIN_ATTEMPTS_WINDOW_MS = 60_000
 
-/** Methods a browser never attaches a CSRF-meaningful body to; safe without an Origin. */
-const READ_ONLY_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
-
-/** The upstream browser-session cookie name prefix; the relay owns this namespace. */
-const UPSTREAM_COOKIE_PREFIX = 'dsh-auth-'
-
 /**
- * Headers a proxy must not forward in either direction (RFC 9110 §7.6.1), plus
- * the non-standard proxy-connection.
+ * How long a half-open upstream WebSocket handshake may hang before the
+ * gateway gives up on it. Without a deadline the client socket sits in the
+ * pending table forever and never learns the upgrade failed — node's http
+ * client would wait out its own socket timeout, which is measured in minutes.
  */
-const HOP_BY_HOP_HEADERS = new Set([
-  'connection',
-  'keep-alive',
-  'proxy-authenticate',
-  'proxy-authorization',
-  'proxy-connection',
-  'te',
-  'trailer',
-  'transfer-encoding',
-  'upgrade',
-])
+const UPGRADE_HANDSHAKE_TIMEOUT_MS = 15_000
 
-/**
- * Headers by which a client asserts where a request came from. The gateway
- * classifies on `socket.remoteAddress` and never reads these, so relaying a
- * caller's own values only hands the next hop a forgeable claim.
- */
-const FORWARDING_HEADERS = [
-  'forwarded',
-  'x-forwarded-for',
-  'x-forwarded-host',
-  'x-forwarded-port',
-  'x-forwarded-proto',
-  'x-real-ip',
-]
-
-/** Whether a Cookie fragment names the upstream session cookie. */
-function isUpstreamSessionPair(pair: string): boolean {
-  return pair.startsWith(UPSTREAM_COOKIE_PREFIX)
-}
-
-/**
- * Drop every `dsh-auth-*` pair from a Cookie header, returning the remainder
- * (possibly '').
- *
- * `attachUpstreamSession` appends the relay's session to the client's own
- * cookie, and upstream reads the FIRST name match. A client that holds any
- * `dsh-auth-<hash>` — typically one minted before dsh's signing secret was
- * reset, so still present but no longer verifying — would therefore shadow the
- * relay's session on every request. That draws a 401, the gateway reads the
- * 401 as "upstream revoked our session" and discards it, the next request
- * re-acquires, and the client's stale cookie shadows that one too: a loop that
- * never converges. Stripping the namespace makes the relay's copy the only one.
- */
-function withoutUpstreamSessionPairs(cookie: string): string {
-  return cookie
-    .split(';')
-    .map((pair) => pair.trim())
-    .filter((pair) => pair !== '' && !isUpstreamSessionPair(pair))
-    .join('; ')
-}
-
-/** Prefixes the gateway owns and must never relay to dsh. */
-function isOwnedPath(pathname: string): boolean {
-  return pathname === '/lan-gateway' || pathname.startsWith('/lan-gateway/')
-}
-
-/**
- * The pathname a request is routed by: the one dsh's router resolves it to
- * (WHATWG URL parsing, which strips the query and collapses dot segments),
- * with trailing slashes then removed for the gateway's own surface tests.
- *
- * The decision paths below (owned prefix, login, logout) must use this rather
- * than the raw request target. dsh normalizes before matching, so a raw-string
- * test disagrees with it on `/foo/../lan-gateway/config` — that is not an owned
- * path by string prefix, stays in the relay, and lands on the plugin's own
- * config route once Host has been rewritten to loopback. Forwarding still
- * relays the raw target: dsh applies the same normalization itself.
- *
- * WHATWG parsing does not drop a trailing slash, and neither does dsh's
- * router, so `/__login/` is not the login page to either of them. The gateway
- * recognizes its own surfaces there anyway: `/__logout/` must still sign out,
- * and `/lan-gateway/config/` must be refused rather than relayed into dsh's
- * single-page fallback. Blocking a trailing-slash spelling of an owned prefix
- * errs toward refusing, which costs nothing — no upstream route lives under it.
- */
-function pathOf(url: string): string {
-  try {
-    return new URL(url, 'http://gateway.invalid').pathname.replace(/\/+$/, '') || '/'
-  } catch {
-    // Unparseable here means unparseable for dsh too; the raw target routes
-    // nowhere and is relayed as-is.
-    return url
-  }
+/** A pending or established WebSocket, and the gate generation it was admitted under. */
+interface TrackedSocket {
+  /** The session that opened it; undefined for a cookie predating per-session ids. */
+  sid: string | undefined
+  /** The gate generation at admission; a bump retires every socket below it. */
+  gate: number
 }
 
 /** A fresh per-session id: 128 random bits, URL-safe. */
@@ -207,13 +136,25 @@ export class LanGateway {
   private state: GatewayState
   private disposed = false
   /**
-   * Established WebSockets (upgraded client sockets), each keyed by the session
-   * that opened it. A socket outlives the request that authenticated it, so it
-   * has to be closable by session: on an epoch bump every socket dies, and on
-   * sign-out only that session's. The value is undefined for a cookie minted
-   * before per-session ids existed, which only a wholesale revocation reaches.
+   * Every WebSocket this gateway is responsible for, keyed by the client
+   * socket: pending handshakes as well as established ones.
+   *
+   * A socket outlives the request that authenticated it, so it has to be
+   * closable by session: on an epoch bump every socket dies, and on sign-out
+   * only that session's. A handshake that is still waiting on the relay or on
+   * upstream's 101 is tracked from the moment it passes the gates, not from the
+   * moment it is spliced — otherwise a revocation that lands mid-handshake
+   * closes the map's contents and then watches the abandoned handshake finish
+   * and register itself as live.
    */
-  private readonly activeDuplexes = new Map<Duplex, string | undefined>()
+  private readonly sockets = new Map<Duplex, TrackedSocket>()
+  /**
+   * Bumped by every revocation (epoch change, per-session sign-out) and by
+   * disposal. A socket is retired when the generation moves past the one it was
+   * admitted under, which is what lets a pending handshake be judged by the
+   * rules in force when it *completes* rather than when it started.
+   */
+  private gate = 0
 
   constructor(
     private readonly config: GatewayConfig,
@@ -234,7 +175,11 @@ export class LanGateway {
   /** Replace the in-memory state; bumps of `sessionEpoch` revoke live sessions and sockets. */
   setState(state: GatewayState): void {
     if (state.sessionEpoch !== this.state.sessionEpoch) {
-      this.destroyActiveDuplexes()
+      // An epoch bump retires every session, so every socket goes — including a
+      // handshake still waiting upstream, which the gate bump leaves unable to
+      // re-admit itself when its 101 arrives.
+      this.gate += 1
+      this.destroyAllSockets()
     }
     this.state = state
   }
@@ -271,38 +216,47 @@ export class LanGateway {
     return `${host}:${address.port}`
   }
 
-  /** Close the server, drop upgraded sockets, and stop accepting connections. */
+  /** Close the server, drop every socket, and stop accepting connections. */
   async close(): Promise<void> {
     if (this.disposed) return
     this.disposed = true
-    this.destroyActiveDuplexes()
+    this.gate += 1
+    this.destroyAllSockets()
     return new Promise((resolve) => {
       this.server.close(() => resolve())
       this.server.closeAllConnections()
     })
   }
 
-  private destroyActiveDuplexes(): void {
-    for (const socket of this.activeDuplexes.keys()) {
+  private destroyAllSockets(): void {
+    for (const socket of this.sockets.keys()) {
       socket.destroy()
     }
-    this.activeDuplexes.clear()
+    this.sockets.clear()
   }
 
   /** Close the sockets one session opened, so signing out ends its live streams too. */
-  private destroyDuplexesFor(sid: string): void {
-    for (const [socket, owner] of this.activeDuplexes) {
-      if (owner !== sid) continue
-      this.activeDuplexes.delete(socket)
+  private destroySocketsFor(sid: string): void {
+    for (const [socket, tracked] of this.sockets) {
+      if (tracked.sid !== sid) continue
+      this.sockets.delete(socket)
       socket.destroy()
     }
   }
 
-  private trackDuplex(socket: Duplex, sid: string | undefined): void {
-    this.activeDuplexes.set(socket, sid)
+  /** Track a socket from admission to close. */
+  private trackSocket(socket: Duplex, sid: string | undefined): void {
+    this.sockets.set(socket, { sid, gate: this.gate })
     socket.on('close', () => {
-      this.activeDuplexes.delete(socket)
+      this.sockets.delete(socket)
     })
+  }
+
+  /** Whether a socket is still tracked, undisposed, and admitted under the current gate. */
+  private stillAdmitted(socket: Duplex): boolean {
+    if (this.disposed) return false
+    const tracked = this.sockets.get(socket)
+    return tracked !== undefined && tracked.gate === this.gate
   }
 
   private sourceOf(req: http.IncomingMessage): SourceClass {
@@ -311,26 +265,13 @@ export class LanGateway {
       : classifySource(req.socket.remoteAddress, this.config.lanCidrs)
   }
 
-  /** Parse the session cookie out of a Cookie header. */
-  private sessionCookie(req: http.IncomingMessage): string | undefined {
-    const header = req.headers.cookie
-    if (typeof header !== 'string') return undefined
-    for (const part of header.split(';')) {
-      const trimmed = part.trim()
-      if (trimmed.startsWith(`${this.config.cookieName}=`)) {
-        return trimmed.slice(this.config.cookieName.length + 1)
-      }
-    }
-    return undefined
-  }
-
   /**
    * The session a request carries, or undefined when it presents none, presents
    * one that no longer verifies under the current epoch, or presents one whose
    * id has been signed out.
    */
   private session(req: http.IncomingMessage): SessionClaims | undefined {
-    const cookie = this.sessionCookie(req)
+    const cookie = sessionCookie(req.headers, this.config.cookieName)
     if (cookie === undefined) return undefined
     const claims = verifySession(
       this.state.cookieSecret,
@@ -347,21 +288,21 @@ export class LanGateway {
     return this.session(req) !== undefined
   }
 
-  /** Whether this source must present a gateway session (default: everyone). */
-  private requiresLogin(source: SourceClass): boolean {
-    return !(this.config.lanPasswordless && source !== 'internet')
-  }
-
-  private serveUnauthorized(res: http.ServerResponse, limited: boolean): void {
+  /**
+   * Send an unauthorized caller to the login form. The rate limiter's refusal
+   * does not come through here: it is answered on the POST itself, where the
+   * banner can be rendered without a round trip.
+   */
+  private serveUnauthorized(res: http.ServerResponse): void {
     res.writeHead(302, {
-      location: `${LOGIN_PATH}${limited ? '?limited=1' : ''}`,
+      location: LOGIN_PATH,
       ...this.securityHeaders(),
     })
     res.end()
   }
 
-  private serveLoginError(res: http.ServerResponse, message: string): void {
-    const opts: LoginPageOptions = { error: message }
+  private serveLoginError(res: http.ServerResponse, message: string, limited = false): void {
+    const opts: LoginPageOptions = limited ? { limited: true } : { error: message }
     res.writeHead(401, {
       'content-type': 'text/html; charset=utf-8',
       'cache-control': 'no-store',
@@ -377,29 +318,12 @@ export class LanGateway {
       : { 'strict-transport-security': 'max-age=15552000' }
   }
 
-  /**
-   * The gateway's own cross-site gate, shared by HTTP and WebSocket upgrades
-   * and applied before any Host/Origin rewriting. Browsers attach Origin to
-   * state-changing requests and to every WebSocket handshake; reads without an
-   * Origin (navigations, non-browser clients holding a session) stay allowed.
-   */
-  private sameSiteAllowed(req: http.IncomingMessage, upgrade: boolean): boolean {
-    const headers = req.headers
-    if (headers['sec-fetch-site'] === 'cross-site') return false
-    const origin = headers.origin
-    const host = headers.host
-    if (origin !== undefined && !originMatchesHost(origin, host)) return false
-    if (upgrade) return origin !== undefined
-    if (!READ_ONLY_METHODS.has(req.method ?? 'GET')) return origin !== undefined
-    return true
-  }
-
   private sessionSetCookie(value: string, maxAgeSeconds: number): string {
     const attributes = `Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAgeSeconds}`
     return `${this.config.cookieName}=${value}; ${attributes}${this.config.secureCookies ? '; Secure' : ''}`
   }
 
-  /** Handle one HTTP request: anonymous allowlist → owned-path refuse → session gate → same-site gate → relay. */
+  /** Handle one HTTP request: login surface → owned-path refuse → session gate → same-site gate → relay. */
   private async handleHttp(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const url = req.url ?? '/'
     const pathname = pathOf(url)
@@ -423,12 +347,12 @@ export class LanGateway {
       return
     }
 
-    if (this.requiresLogin(source) && !this.authorized(req)) {
-      this.serveUnauthorized(res, false)
+    if (requiresLogin(source, this.config.lanPasswordless) && !this.authorized(req)) {
+      this.serveUnauthorized(res)
       return
     }
 
-    if (!this.sameSiteAllowed(req, false)) {
+    if (!sameSiteAllowed(req, false)) {
       res.writeHead(403, this.securityHeaders())
       res.end('forbidden')
       return
@@ -439,7 +363,6 @@ export class LanGateway {
 
   /** Handle the login GET form / POST submission. */
   private handleLogin(req: http.IncomingMessage, res: http.ServerResponse): void {
-    const limited = req.url?.includes('limited=1') ?? false
     if (req.method === 'GET' || req.method === 'HEAD') {
       serveLoginGet(res, this.securityHeaders())
       return
@@ -450,9 +373,19 @@ export class LanGateway {
       return
     }
 
+    // Issuing a session is a state change on the same footing as retiring one
+    // (see handleLogout), and a cross-site form post spends the victim's source
+    // address in the login limiter. Refuse before the limiter so a hostile page
+    // cannot drain someone else's budget either.
+    if (!loginOriginAllowed(req.headers)) {
+      res.writeHead(403, this.securityHeaders())
+      res.end('forbidden')
+      return
+    }
+
     const key = req.socket.remoteAddress ?? 'unknown'
     if (!this.loginLimiter.allow(key)) {
-      this.serveLoginError(res, 'Too many attempts — please wait a minute.')
+      this.serveLoginError(res, 'Too many attempts — please wait a minute.', true)
       return
     }
 
@@ -465,7 +398,18 @@ export class LanGateway {
       } catch {
         password = undefined
       }
-      const accepted = password !== undefined && await verifyPassword(this.state, password)
+      // Verify against the state this request started under, and refuse to sign
+      // anything if it moved. scrypt takes tens of milliseconds; a password
+      // change, a clear, or a secret rotation landing inside that window
+      // advances the epoch, and signing the new epoch on the strength of the
+      // old password would hand back exactly the session the epoch bump was
+      // meant to kill.
+      const checked = this.state
+      const accepted = password !== undefined && await verifyPassword(checked, password)
+      if (this.state !== checked || this.disposed) {
+        this.serveLoginError(res, 'Sign-in was interrupted — please try again.')
+        return
+      }
       if (!accepted) {
         this.serveLoginError(res, 'Incorrect password.')
         return
@@ -513,7 +457,7 @@ export class LanGateway {
       return
     }
     // A logout is a state change: refuse cross-site triggers.
-    if (!this.sameSiteAllowed(req, false)) {
+    if (!sameSiteAllowed(req, false)) {
       res.writeHead(403, this.securityHeaders())
       res.end('forbidden')
       return
@@ -522,7 +466,11 @@ export class LanGateway {
     if (claims?.sid !== undefined) {
       this.state = revokeSession(this.state, claims.sid, claims.exp)
       this.config.onStateChange?.(this.state)
-      this.destroyDuplexesFor(claims.sid)
+      // Dropping the session's sockets from the map is what retires a handshake
+      // it opened mid-flight too: the 101 callback re-checks membership, finds
+      // it gone, and closes instead of splicing. The epoch is untouched, so the
+      // account's other sessions keep working.
+      this.destroySocketsFor(claims.sid)
     }
     res.writeHead(302, {
       location: '/',
@@ -532,74 +480,23 @@ export class LanGateway {
     res.end()
   }
 
-  /** Build the outbound headers: rewrite Host/Origin to the loopback upstream. */
-  private upstreamHeaders(req: http.IncomingMessage, keepUpgrade: boolean): http.OutgoingHttpHeaders {
-    const headers: http.OutgoingHttpHeaders = { ...req.headers }
-    headers.host = `127.0.0.1:${this.config.dshPort}`
-    if (typeof headers.origin === 'string') {
-      headers.origin = `http://127.0.0.1:${this.config.dshPort}`
-    }
-    // Hop-by-hop headers the gateway must not forward.
-    delete headers['proxy-connection']
-    if (!keepUpgrade) {
-      delete headers.connection
-      delete headers.upgrade
-    }
-    // A caller's own forwarding claims are not ours to relay.
-    for (const name of FORWARDING_HEADERS) delete headers[name]
-    // The relay is the only authority on the upstream session cookie.
-    if (typeof headers.cookie === 'string') {
-      const kept = withoutUpstreamSessionPairs(headers.cookie)
-      if (kept === '') delete headers.cookie
-      else headers.cookie = kept
-    }
-    return headers
-  }
-
-  /** Attach the shared upstream session cookie to the outbound headers, if any. */
-  private attachUpstreamSession(headers: http.OutgoingHttpHeaders): boolean {
-    const session = this.config.upstreamSession
-    if (session === undefined) return false
-    const cookie = session.peek()
-    if (cookie === undefined) return false
-    const existing = headers.cookie
-    headers.cookie = typeof existing === 'string' && existing !== ''
-      ? `${existing}; ${cookie}`
-      : cookie
-    return true
-  }
-
-  /**
-   * The headers to send back to the client: hop-by-hop headers dropped, and
-   * the upstream session cookie withheld. Upstream's one cookie-minting route
-   * is the launch-token exchange at `/`, so a client that already holds a
-   * gateway session could otherwise post the token through the gateway and
-   * walk away with a durable upstream credential the relay exists to keep on
-   * this side. Cookies from other routes (plugins) still pass through.
-   */
-  private downstreamHeaders(upstream: http.IncomingHttpHeaders): http.OutgoingHttpHeaders {
-    const headers: http.OutgoingHttpHeaders = {}
-    for (const [key, value] of Object.entries(upstream)) {
-      if (value === undefined) continue
-      const lower = key.toLowerCase()
-      if (HOP_BY_HOP_HEADERS.has(lower)) continue
-      if (lower === 'set-cookie') {
-        const list = (Array.isArray(value) ? value : [value])
-          .filter((entry) => !isUpstreamSessionPair(entry.trim()))
-        if (list.length > 0) headers[key] = list
-        continue
-      }
-      headers[key] = value
-    }
-    return headers
+  /** The shared upstream session's cookie value, if the relay holds one. */
+  private async upstreamCookie(): Promise<string | undefined> {
+    return this.config.upstreamSession === undefined
+      ? undefined
+      : this.config.upstreamSession.cookie()
   }
 
   /** Forward an HTTP request to dsh, replaying the shared upstream session. */
   private async relayHttp(req: http.IncomingMessage, res: http.ServerResponse, url: string): Promise<void> {
     const session = this.config.upstreamSession
-    if (session !== undefined) await session.cookie()
-    const headers = this.upstreamHeaders(req, false)
-    const attached = this.attachUpstreamSession(headers)
+    const relayed = await this.upstreamCookie()
+    const headers = upstreamRequestHeaders(req.headers, {
+      dshPort: this.config.dshPort,
+      keepUpgrade: false,
+      upstreamCookie: relayed,
+    })
+    const attached = relayed !== undefined
 
     const proxyReq = http.request({
       host: '127.0.0.1',
@@ -614,7 +511,7 @@ export class LanGateway {
       if (attached && session !== undefined && proxyRes.statusCode === 401) {
         session.invalidate()
       }
-      res.writeHead(proxyRes.statusCode ?? 502, this.downstreamHeaders(proxyRes.headers))
+      res.writeHead(proxyRes.statusCode ?? 502, downstreamResponseHeaders(proxyRes.headers))
       proxyRes.pipe(res)
     })
     proxyReq.on('error', () => {
@@ -646,7 +543,7 @@ export class LanGateway {
     // The session is read once: the socket this upgrade ends up holding stays
     // attributable to it, so signing that session out can close the socket.
     const claims = this.session(req)
-    if (this.requiresLogin(source) && claims === undefined) {
+    if (requiresLogin(source, this.config.lanPasswordless) && claims === undefined) {
       refuse(401)
       return
     }
@@ -654,15 +551,30 @@ export class LanGateway {
     // Upgrades are state changes that only browsers meaningfully make: require
     // a same-origin Origin so a cross-site page cannot open a socket that rides
     // the requester's ambient session.
-    if (!this.sameSiteAllowed(req, true)) {
+    if (!sameSiteAllowed(req, true)) {
       refuse(403)
       return
     }
 
-    const session = this.config.upstreamSession
-    if (session !== undefined) await session.cookie()
-    const headers = this.upstreamHeaders(req, true)
-    this.attachUpstreamSession(headers)
+    // Own the socket from here, not from the 101: everything below awaits, and
+    // an epoch bump, a sign-out or a dispose landing in that window has to be
+    // able to reach this handshake.
+    this.trackSocket(socket, claims?.sid)
+    const retire = (): void => {
+      if (!this.sockets.delete(socket)) return
+      socket.destroy()
+    }
+
+    const relayed = await this.upstreamCookie()
+    if (!this.stillAdmitted(socket)) {
+      retire()
+      return
+    }
+    const headers = upstreamRequestHeaders(req.headers, {
+      dshPort: this.config.dshPort,
+      keepUpgrade: true,
+      upstreamCookie: relayed,
+    })
 
     const proxyReq = http.request({
       host: '127.0.0.1',
@@ -671,13 +583,34 @@ export class LanGateway {
       path: url,
       headers,
     })
+    const timer = setTimeout(() => {
+      // Nothing came back in time. Drop both ends rather than leave the client
+      // socket parked in the map with no way to learn the handshake failed.
+      proxyReq.destroy()
+      retire()
+    }, UPGRADE_HANDSHAKE_TIMEOUT_MS)
+    const settle = (): void => {
+      clearTimeout(timer)
+    }
+
     proxyReq.on('upgrade', (proxyRes, proxySocket, proxyHead) => {
-      this.trackDuplex(socket, claims?.sid)
+      settle()
+      // The gated decision was made before the relay exchange and before
+      // upstream answered; re-check it now, because a revocation in between is
+      // exactly the case that used to slip through and register a live socket
+      // after the sweep had already run.
+      if (!this.stillAdmitted(socket)) {
+        proxySocket.destroy()
+        retire()
+        return
+      }
       // node's http client has already consumed the 101 response headers, so
       // reconstruct them on the client socket before splicing.
-      const statusLine = `HTTP/1.1 ${proxyRes.statusCode ?? 101} ${proxyRes.statusMessage ?? 'Switching Protocols'}\r\n`
-      const headerLines = Object.entries(proxyRes.headers)
-        .map(([key, value]) => `${key}: ${Array.isArray(value) ? value.join(', ') : value}\r\n`)
+      const status = proxyRes.statusCode ?? 101
+      const statusLine = `HTTP/1.1 ${status} ${proxyRes.statusMessage ?? 'Switching Protocols'}\r\n`
+      const headerLines = Object.entries(upgradeResponseHeaders(proxyRes.headers))
+        .flatMap(([key, value]) => (Array.isArray(value) ? value : [value])
+          .map(entry => `${key}: ${entry}\r\n`))
         .join('')
       socket.write(`${statusLine}${headerLines}\r\n`)
       // Forward the client's own head bytes (initial WebSocket frames) to dsh.
@@ -691,7 +624,37 @@ export class LanGateway {
       socket.on('error', () => proxySocket.destroy())
       proxySocket.on('error', () => socket.destroy())
     })
-    proxyReq.on('error', () => socket.destroy())
+
+    // A non-101 response is an ordinary HTTP answer to the handshake: upstream
+    // refused it (401 after a revocation, 404 for an unknown path, 502 from a
+    // proxy). Without this branch node emits neither 'upgrade' nor 'error' and
+    // the client socket would sit open forever holding no connection at all.
+    proxyReq.on('response', (proxyRes) => {
+      settle()
+      proxyRes.resume() // drain so the socket can be released
+      if (!this.stillAdmitted(socket)) {
+        retire()
+        return
+      }
+      if (proxyRes.statusCode === 401 && relayed !== undefined) {
+        // Same reading as the HTTP branch: upstream rejected the session we
+        // relayed, so drop it. Otherwise a base that only ever sees WebSocket
+        // reconnects would keep replaying a dead session until it lapses.
+        this.config.upstreamSession?.invalidate()
+      }
+      const body = `upstream refused the WebSocket upgrade (HTTP ${proxyRes.statusCode ?? 502})`
+      socket.write(
+        `HTTP/1.1 ${proxyRes.statusCode ?? 502} ${proxyRes.statusMessage ?? 'Upstream Refused'}\r\n`
+        + `Connection: close\r\nContent-Type: text/plain; charset=utf-8\r\n`
+        + `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
+      )
+      retire()
+    })
+
+    proxyReq.on('error', () => {
+      settle()
+      retire()
+    })
     proxyReq.end()
   }
 }

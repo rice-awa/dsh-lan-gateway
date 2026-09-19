@@ -6,7 +6,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/DeepSeek%20Harness-4d6bfe?logo=deepseek&logoColor=fff&style=flat-square" alt="DeepSeek Harness" />
-  <img src="https://img.shields.io/badge/version-0.5.4-2b7fff?style=flat-square" alt="version 0.5.4" />
+  <img src="https://img.shields.io/badge/version-0.5.5-2b7fff?style=flat-square" alt="version 0.5.5" />
   <img src="https://img.shields.io/badge/TLS-8b5cf6?logo=lock&logoColor=fff&style=flat-square" alt="TLS" />
   <img src="https://img.shields.io/github/license/rice-awa/dsh-lan-gateway?style=flat-square" alt="MIT license" />
   <a href="https://awesome-dsh-plugin.com"><img src="https://awesome-dsh-plugin.com/badge.svg" alt="awesome · DSH plugin" /></a>
@@ -83,12 +83,12 @@ lan_gateway disable           # 关闭
 | `cookieName` | `dsh_gw_auth` | 会话 cookie 名，不进卡片 |
 | `tlsEnabled` | `false` | 是否以 HTTPS 提供服务 |
 | `tlsMode` | `self-signed` | `self-signed` 自动生成 / `custom` 用自己的证书 |
-| `tlsSelfSignedHosts` | `localhost` | 自签名证书的 SAN（逗号分隔的域名 / IP） |
+| `tlsSelfSignedHosts` | `localhost` | 自签名证书的 SAN（逗号分隔的域名 / IP）。仅影响下次换发，见下「证书有效期」 |
 | `tlsCertPath` | — | `custom` 模式：PEM 证书（或证书链）绝对路径 |
 | `tlsKeyPath` | — | `custom` 模式：PEM 私钥绝对路径 |
 | `tlsCertMaxAgeDays` | `825` | 自签名证书有效期（天），见下「证书有效期」 |
 | `allowInsecurePlaintext` | `false` | 允许明文 HTTP 监听（见下「入口加密」） |
-| `trustedTerminator` | — | 声明一个受信 TLS 终止代理标识，视为加密入口（如 `nginx`） |
+| `trustedTerminator` | — | 声明一个受信 TLS 终止代理标识，视为加密入口（如 `nginx`）。注意登录限流的键，见下「登录限流」 |
 | `secureCookies` | 自动 | 会话 cookie 的 `Secure` 属性显式开关，默认按 `tlsEnabled` 或 `trustedTerminator` 推断（见下） |
 
 默认 `lanCidrs`：`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`、`169.254.0.0/16`。IPv6 的 `fe80::/10`（link-local）与 `127.0.0.0/8`、`::1` 归为 LAN/loopback。
@@ -131,7 +131,7 @@ lan_gateway disable           # 关闭
     tlsKeyPath: /etc/letsencrypt/live/example.com/privkey.pem
 ```
 
-自签名证书在首次启用 TLS 时生成一次，写入 `~/.dsh/lan-gateway/tls/`（`selfsigned.crt` / `selfsigned.key`，0600），之后重启复用。更换证书使用 `lan_gateway tls-regenerate`，它会换掉密钥并热重启监听器。已到期的证书在启动时自动换发并记一条 warning。
+自签名证书在首次启用 TLS 时生成一次，写入 `~/.dsh/lan-gateway/tls/`（`selfsigned.crt` / `selfsigned.key`，0600），之后重启复用。更换证书使用 `lan_gateway tls-regenerate`，它会换掉密钥并热重启监听器。已到期的证书在启动时自动换发并记一条 warning。修改 `tlsSelfSignedHosts` 或 `tlsCertMaxAgeDays` 只影响**下次换发**：已有证书沿用至到期，不会在保存时被悄悄替换。
 
 ### 证书有效期
 
@@ -157,6 +157,12 @@ lan_gateway disable           # 关闭
 ```
 
 `lan_gateway status` 会如实报告实际生效的属性，以及声明的代理属于 TLS 还是明文入口。设置页里对应「自动 / 始终 Secure / 不加 Secure」三档。
+
+### 登录限流
+
+登录尝试以 TCP 源地址为键限流，每分钟 5 次。`X-Forwarded-For` 与 `Forwarded` 在转发前一律删除，也不参与限流取键——它们可由客户端任意伪造，用它们作为键等于把限流关掉。
+
+代价是声明 `trustedTerminator` 之后，所有浏览器请求都来自代理这一个地址，5 次/分钟变成**整个部署共享**的额度，而非每客户端 5 次。这一耦合没有便宜的修法：要么接受它（把上限视为抗暴力破解的下限而非每用户配额），要么让代理直连、由网关自己面对客户端。当前不接受按 `X-Forwarded-For` 分桶。
 
 注意 `secureCookies: false` 说的是浏览器到入口这一段是明文，网关登录密码和会话 cookie 会在这一段明文传输。这与 `allowInsecurePlaintext` 描述的不是同一段链路：后者指代理到网关之间不加密，前者指浏览器到代理之间不加密。只有当代理本身已经对用户完成鉴权、且可以接受这段明文时，才应这样配置。
 
@@ -227,8 +233,8 @@ pnpm typecheck   # tsc 双端（host + client）
 pnpm install --frozen-lockfile
 pnpm typecheck && pnpm test
 npm publish --access public                       # prepack 自动构建 lib/
-git tag -a v0.5.4 -m "…" && git push origin v0.5.4
-gh release create v0.5.4 --generate-notes ./*.tgz # 可选：Release + tgz 附件
+git tag -a v0.5.5 -m "…" && git push origin v0.5.5
+gh release create v0.5.5 --generate-notes ./*.tgz # 可选：Release + tgz 附件
 ```
 
 ## 安全评估
