@@ -246,6 +246,10 @@ gh release create v0.5.5 --generate-notes ./*.tgz # 可选：Release + tgz 附�
 - [上游研究](docs/security/qvd-2026-57410-research.md)：公开通告、上游提交与版本核对。
 - [0.5.4 复审与修复清单](docs/security/audit-2026-09-19-fix-list.md)：0.5.3 的实现细节复审（G1–G12）与修复记录。
 
+架构层面的复审另见 [docs/review/](docs/review/)：
+
+- [架构复审（2026-09-19）](docs/review/architecture-review-2026-09-19.md)：针对 0.5.4 的 C1–C6 结构候选与 D1–D14 缺陷清单，0.5.5 已全部关闭。文档记录的是复审当时的状态，不是待办列表。
+
 ## 许可
 
 [MIT](./LICENSE)
