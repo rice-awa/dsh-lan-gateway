@@ -103,13 +103,14 @@ interface HttpResponse {
 }
 
 /** One HTTP request against the gateway (cookie jar optional). */
-function req(port: number, method: string, path: string, opts: { cookie?: string; origin?: string; type?: string; body?: string } = {}): Promise<HttpResponse> {
+function req(port: number, method: string, path: string, opts: { cookie?: string; origin?: string; type?: string; body?: string; extra?: Record<string, string> } = {}): Promise<HttpResponse> {
   return new Promise((resolve, reject) => {
     const headers: http.OutgoingHttpHeaders = { host: `127.0.0.1:${port}` }
     if (opts.cookie !== undefined) headers.cookie = opts.cookie
     if (opts.origin !== undefined) headers.origin = opts.origin
     if (opts.type !== undefined) headers['content-type'] = opts.type
     if (opts.body !== undefined) headers['content-length'] = Buffer.byteLength(opts.body)
+    for (const [key, value] of Object.entries(opts.extra ?? {})) headers[key] = value
     const client = http.request({ host: '127.0.0.1', port, method, path, headers }, (res) => {
       const chunks: Buffer[] = []
       res.on('data', (c: Buffer) => chunks.push(c))
@@ -310,6 +311,55 @@ describe('LanGateway end-to-end against a fake upstream', () => {
     }
   })
 
+  it('row 9b: a dot-segment spelling of the owned path is refused too, on HTTP and WS', async () => {
+    const upstream = await createUpstream()
+    const { gateway, port } = await startGateway(authedState(), upstream, { source: 'internet' })
+    try {
+      const issued = await login(port, 'correct horse battery')
+      const jar = cookieJar(issued.headers)
+
+      // The gateway routes by the same WHATWG-normalized path dsh's router
+      // uses; a raw-string prefix test would let these through to the relay,
+      // where Host is rewritten to loopback and the plugin's own config route
+      // accepts them.
+      for (const path of [
+        '/foo/../lan-gateway/config',
+        '/./lan-gateway/config',
+        '/a/b/../../lan-gateway/config',
+      ]) {
+        const res = await req(port, 'GET', path, { cookie: jar })
+        expect(res.status, path).toBe(403)
+      }
+
+      const upgraded = await rawUpgrade(port, '/foo/../lan-gateway/config', {
+        cookie: jar,
+        origin: `http://127.0.0.1:${port}`,
+      })
+      expect(upgraded).toMatch(/^HTTP\/1\.1 403 /)
+
+      expect(upstream.seen).toHaveLength(0)
+    } finally {
+      await gateway.close()
+      await upstream.close()
+    }
+  })
+
+  it('row 9c: normalization does not over-block — an ordinary path still relays verbatim', async () => {
+    const upstream = await createUpstream()
+    const { gateway, port } = await startGateway(authedState(), upstream, { source: 'internet' })
+    try {
+      const issued = await login(port, 'correct horse battery')
+      const jar = cookieJar(issued.headers)
+      const res = await req(port, 'GET', '/a/../api/chat', { cookie: jar })
+      expect(res.status).toBe(200)
+      // Forwarding relays the raw target; dsh normalizes it the same way.
+      expect(upstream.seen[0]!.url).toBe('/a/../api/chat')
+    } finally {
+      await gateway.close()
+      await upstream.close()
+    }
+  })
+
   it('row 12: a correct login mints a session cookie with the right attributes and forwards', async () => {
     const upstream = await createUpstream()
     const { gateway, port } = await startGateway(authedState(), upstream, {
@@ -473,6 +523,97 @@ describe('LanGateway end-to-end against a fake upstream', () => {
       const rejected = await req(port, 'GET', '/', { cookie: jar })
       expect(rejected.status).toBe(401)
       expect(invalidate).toHaveBeenCalledTimes(1)
+    } finally {
+      await gateway.close()
+      await upstream.close()
+    }
+  })
+
+  it('a client-held dsh-auth cookie cannot shadow the relayed session', async () => {
+    const upstream = await createUpstream()
+    const session: UpstreamSession = {
+      peek: () => 'dsh-auth-abc123=relayed-session',
+      cookie: async () => 'dsh-auth-abc123=relayed-session',
+      invalidate: vi.fn(),
+    }
+    const { gateway, port } = await startGateway(authedState(), upstream, {
+      source: 'internet',
+      upstreamSession: session,
+    })
+    try {
+      const issued = await login(port, 'correct horse battery')
+      const jar = cookieJar(issued.headers)
+      // The client still holds a same-named cookie from before upstream's
+      // signing secret was reset: present, unexpired, no longer verifying.
+      // Upstream reads the first name match, so relaying it would 401 forever
+      // while the gateway kept re-acquiring a session that was never used.
+      const res = await req(port, 'GET', '/', { cookie: `${jar}; dsh-auth-abc123=stale-client-session` })
+      expect(res.status).toBe(200)
+
+      const forwarded = upstream.seen[0]!.headers.cookie!
+      expect(forwarded).not.toContain('stale-client-session')
+      expect(forwarded).toContain('dsh-auth-abc123=relayed-session')
+      expect(forwarded).toContain('dsh_gw_auth=')
+    } finally {
+      await gateway.close()
+      await upstream.close()
+    }
+  })
+
+  it('withholds the upstream session cookie from relayed responses, keeps other cookies', async () => {
+    const upstream = await createUpstream()
+    const { gateway, port } = await startGateway(authedState(), upstream, { source: 'internet' })
+    try {
+      const issued = await login(port, 'correct horse battery')
+      const jar = cookieJar(issued.headers)
+      // A gated client posting the launch token through the gateway must not
+      // be able to walk away with a durable upstream credential.
+      upstream.respondNext(303, '', {
+        location: '/',
+        'set-cookie': [
+          'dsh-auth-abc123=minted-upstream-session; HttpOnly; Path=/',
+          'some_plugin_cookie=keepme; Path=/',
+        ],
+        'keep-alive': 'timeout=5, max=1000',
+        'proxy-authenticate': 'Basic realm="upstream"',
+      })
+      const res = await req(port, 'GET', '/?token=exfiltrate-me', { cookie: jar })
+      expect(res.status).toBe(303)
+
+      const cookies = setCookieValues(res.headers)
+      expect(cookies.some((value) => value.startsWith('dsh-auth-'))).toBe(false)
+      expect(cookies.some((value) => value.startsWith('some_plugin_cookie=keepme'))).toBe(true)
+
+      // Hop-by-hop response headers are not forwarded either. (keep-alive is
+      // not asserted: node's own server layer emits one regardless.)
+      expect(res.headers['proxy-authenticate']).toBeUndefined()
+    } finally {
+      await gateway.close()
+      await upstream.close()
+    }
+  })
+
+  it('does not relay client-supplied forwarding headers upstream', async () => {
+    const upstream = await createUpstream()
+    const { gateway, port } = await startGateway(authedState(), upstream, { source: 'internet' })
+    try {
+      const issued = await login(port, 'correct horse battery')
+      const jar = cookieJar(issued.headers)
+      const res = await req(port, 'GET', '/', {
+        cookie: jar,
+        extra: {
+          'x-forwarded-for': '203.0.113.9',
+          'x-forwarded-proto': 'https',
+          'x-real-ip': '203.0.113.9',
+          forwarded: 'for=203.0.113.9',
+        },
+      })
+      expect(res.status).toBe(200)
+      const forwarded = upstream.seen[0]!.headers
+      expect(forwarded['x-forwarded-for']).toBeUndefined()
+      expect(forwarded['x-forwarded-proto']).toBeUndefined()
+      expect(forwarded['x-real-ip']).toBeUndefined()
+      expect(forwarded.forwarded).toBeUndefined()
     } finally {
       await gateway.close()
       await upstream.close()

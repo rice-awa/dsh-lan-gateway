@@ -73,6 +73,19 @@ function nameValueOnly(setCookie: string): string {
   return (semi === -1 ? setCookie : setCookie.slice(0, semi)).trim()
 }
 
+/**
+ * The pathname of a URL, for logging. Never the whole URL: the authenticated
+ * URL carries the launch token as a query parameter, and that token is a
+ * bearer credential for the upstream harness.
+ */
+function pathOf(url: string): string {
+  try {
+    return new URL(url).pathname
+  } catch {
+    return '<unparseable>'
+  }
+}
+
 /** The cookie name of a `Set-Cookie` string (`''` when it is malformed). */
 function cookieNameOf(setCookie: string): string {
   const eq = setCookie.indexOf('=')
@@ -121,7 +134,7 @@ function exchange(
     try {
       target = new URL(url)
     } catch {
-      log(`exchange: unparseable authenticatedUrl ${url}`)
+      log('exchange: authenticatedUrl is not parseable')
       resolve(undefined)
       return
     }
@@ -228,7 +241,9 @@ export class UpstreamSessionRelay implements UpstreamSession {
       this.log('authenticatedUrl() returned undefined; keeping current session')
       return this.held?.header
     }
-    this.log(`acquiring session from ${url}`)
+    // Log only the path: the URL carries the launch token in its query string,
+    // and that token is a bearer credential for the upstream harness.
+    this.log(`acquiring session from ${pathOf(url)}`)
     const result = await exchange(url, this.authority, this.port, this.log)
     if (result !== undefined) {
       this.held = result

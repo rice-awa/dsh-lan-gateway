@@ -100,9 +100,19 @@ export function classifySource(
   }
 
   if (address === '::1') return 'loopback'
-  // Link-local IPv6 fe80::/10.
-  if (address.toLowerCase().startsWith('fe80:')) return 'lan'
+  if (inIpv6LinkLocal(address)) return 'lan'
   return 'internet'
+}
+
+/**
+ * Whether a textual IPv6 address falls inside fe80::/10. The first ten bits are
+ * `1111111010`, so the leading hextet spans fe80–febf; a `startsWith('fe80:')`
+ * test covers only fe80::/16 and misclassifies fe90::–febf:: as internet.
+ */
+function inIpv6LinkLocal(address: string): boolean {
+  const match = /^([0-9a-fA-F]{1,4}):/.exec(address)
+  if (match === null) return false
+  return (Number.parseInt(match[1]!, 16) & 0xffc0) === 0xfe80
 }
 
 /** Encode a byte buffer as URL-safe base64 without padding. */
@@ -181,7 +191,15 @@ export function originMatchesHost(origin: string | undefined, host: string | und
 
 /** A token bucket limiter keyed by source address. */
 export class RateLimiter {
+  /**
+   * Hard ceiling on tracked sources. Expiry alone only reclaims a bucket when
+   * `prune` runs, and a spray from many distinct addresses inside one window
+   * outruns it, so the map also sheds its soonest-expiring entries past this.
+   */
+  private static readonly MAX_BUCKETS = 10_000
   private readonly buckets = new Map<string, { tokens: number; resetAt: number }>()
+  /** Epoch millis at which the next opportunistic sweep is due. */
+  private nextPruneAt = 0
   constructor(
     private readonly maxTokens: number,
     private readonly windowMs: number,
@@ -194,22 +212,42 @@ export class RateLimiter {
    */
   allow(key: string): boolean {
     const now = Date.now()
-    const bucket = this.buckets.get(key)
-    if (bucket === undefined || bucket.resetAt <= now) {
-      this.buckets.set(key, { tokens: this.maxTokens - 1, resetAt: now + this.windowMs })
+    // Sweep on a rolling window. Without this, expired buckets are only
+    // replaced when their own key returns, so every address that ever posted
+    // to the login route keeps an entry for the life of the process.
+    if (now >= this.nextPruneAt) {
+      this.prune(now)
+      this.nextPruneAt = now + this.windowMs
+    }
+    const existing = this.buckets.get(key)
+    if (existing !== undefined && existing.resetAt > now) {
+      if (existing.tokens <= 0) return false
+      existing.tokens -= 1
       return true
     }
-    if (bucket.tokens > 0) {
-      bucket.tokens -= 1
-      return true
+    // A new bucket. A spray of distinct addresses inside one window outruns
+    // expiry, so shed the closest-to-expiring entries first — they are the
+    // ones about to lapse anyway, so the eviction costs the least fidelity.
+    if (existing === undefined && this.buckets.size >= RateLimiter.MAX_BUCKETS) {
+      this.evictSoonestToExpire()
     }
-    return false
+    this.buckets.set(key, { tokens: this.maxTokens - 1, resetAt: now + this.windowMs })
+    return true
   }
 
-  /** Drop expired buckets to bound memory. */
+  /** Drop expired buckets to bound memory. Called from {@link allow}. */
   prune(now: number = Date.now()): void {
     for (const [key, bucket] of this.buckets) {
       if (bucket.resetAt <= now) this.buckets.delete(key)
+    }
+  }
+
+  /** Trim back to 90% of the ceiling, oldest expiry first. */
+  private evictSoonestToExpire(): void {
+    const target = Math.floor(RateLimiter.MAX_BUCKETS * 0.9)
+    const byExpiry = [...this.buckets.entries()].sort((a, b) => a[1].resetAt - b[1].resetAt)
+    for (const [key] of byExpiry.slice(0, Math.max(0, this.buckets.size - target))) {
+      this.buckets.delete(key)
     }
   }
 }
