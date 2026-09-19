@@ -4,7 +4,8 @@
  *
  * dsh's web CLI hard-refuses `--host 0.0.0.0` (exposing remote code execution
  * to the network), so this plugin leaves dsh bound to 127.0.0.1 and starts its
- * own reverse-proxy gateway on 0.0.0.0 that forwards to the loopback dsh port,
+ * own reverse-proxy gateway on the unspecified address — both families, so
+ * IPv6 clients reach it too — that forwards to the loopback dsh port,
  * rewriting Host/Origin so the request reaches the dsh web server as if it came
  * from the loopback authority it names.
  *
@@ -22,8 +23,10 @@
  *   TLS-terminating proxy, or an explicit `allowInsecurePlaintext` opt-in is
  *   present.
  * - The gateway never relays its own surface (`/lan-gateway/*`, the login and
- *   logout pages); sessions carry a revocation epoch that a password change or
- *   secret rotation bumps, killing old cookies and established WebSockets.
+ *   logout pages). Sessions are revocable: each carries a random id, so signing
+ *   out retires that one session and the WebSockets it opened, and each carries
+ *   a revocation epoch, so a password change or secret rotation kills every
+ *   session at once.
  *
  * Every tunable is also exposed as the `lan-gateway` user-settings namespace
  * (`ctx.settings`), so the official DSH Settings → Plugins page can adjust
@@ -56,6 +59,7 @@ import {
   describeCert,
   loadCustomCert,
   loadOrCreateSelfSigned,
+  loadOrRenewSelfSigned,
   parseSelfSignedHosts,
   regenerateSelfSigned,
   type TlsMaterial,
@@ -113,7 +117,7 @@ export interface GatewayController {
 export interface Config {
   /** Whether the gateway listener is started at boot. Default false (safe). */
   enabled: boolean
-  /** Port to bind on 0.0.0.0. */
+  /** Port to bind on the unspecified address, both address families. */
   gatewayPort: number
   /** Explicit dsh target port; defaults to the live `ctx.webServer.port`. */
   dshTargetPort?: number
@@ -145,7 +149,18 @@ export interface Config {
   tlsKeyPath?: string
   /** Self-signed mode: comma/space separated DNS names and IPs for the SANs. */
   tlsSelfSignedHosts?: string
-  /** Self-signed certificate validity in days (default 825 ≈ 27 months). */
+  /**
+   * Self-signed certificate validity in days (default 825 ≈ 27 months).
+   *
+   * 825 is the ceiling Apple states for TLS server certificates, and the
+   * well-known 398-day limit — which this default is sometimes mistaken for
+   * exceeding — applies only to certificates chaining to a root preinstalled
+   * by the platform: Apple exempts user- and administrator-added roots
+   * outright, and a self-signed certificate is always one of those. Since a
+   * self-signed certificate is either clicked through or trusted by hand,
+   * there is nothing to gain from the shorter window and a re-trust to lose
+   * every time it lapses.
+   */
   tlsCertMaxAgeDays: number
   /**
    * Escape hatch (default false): permit plaintext HTTP. Never derived from
@@ -259,17 +274,16 @@ export function resolveSecureCookies(
 }
 
 /** Resolve the TLS material for a config, or undefined when TLS is off. */
-function resolveTls(cfg: Config): TlsMaterial | undefined {
+function resolveTls(cfg: Config): { material: TlsMaterial; renewed: boolean } | undefined {
   if (!cfg.tlsEnabled) return undefined
   if (cfg.tlsMode === 'custom') {
-    return loadCustomCert(cfg.tlsCertPath ?? '', cfg.tlsKeyPath ?? '')
+    return { material: loadCustomCert(cfg.tlsCertPath ?? '', cfg.tlsKeyPath ?? ''), renewed: false }
   }
   const hosts = parseSelfSignedHosts(cfg.tlsSelfSignedHosts)
   if (hosts.length === 0) {
     throw new Error('tlsSelfSignedHosts must name at least one host (DNS name or IP)')
   }
-  const { material } = loadOrCreateSelfSigned({ hosts, days: cfg.tlsCertMaxAgeDays })
-  return material
+  return loadOrRenewSelfSigned({ hosts, days: cfg.tlsCertMaxAgeDays })
 }
 
 /**
@@ -383,7 +397,8 @@ export function apply(ctx: Context, config: Config): void {
       throw new Error(`dsh-lan-gateway: cannot start — ${problems.join(' ')}`)
     }
     const dshPort = cfg.dshTargetPort ?? ctx.webServer.port
-    const tls = resolveTls(cfg)
+    const resolved = resolveTls(cfg)
+    const tls = resolved?.material
     const encryptedIngress = cfg.tlsEnabled || cfg.trustedTerminator !== undefined
     const secureCookies = resolveSecureCookies(cfg)
     const next = new LanGateway({
@@ -396,15 +411,28 @@ export function apply(ctx: Context, config: Config): void {
       secureCookies,
       ...(tls !== undefined ? { tls } : {}),
       ...(makeRelay !== undefined ? { upstreamSession: makeRelay(dshPort) } : {}),
+      onStateChange: (updated) => {
+        // The gateway retired a session itself (sign-out). Keep the plugin's
+        // copy and the state file in step, or a restart would resurrect a
+        // session the user signed out of.
+        state = updated
+        saveState(state)
+      },
     }, state)
     await next.listen()
     gateway = next
     startedWith = listenerKey(cfg, makeRelay !== undefined)
     ctx.logger.info(
-      `dsh-lan-gateway: listening on 0.0.0.0:${cfg.gatewayPort}${tls !== undefined ? ' (TLS)' : ''}`
+      `dsh-lan-gateway: listening on ${next.boundAddress()}${tls !== undefined ? ' (TLS)' : ''}`
       + ` -> 127.0.0.1:${dshPort}${encryptedIngress ? '' : ' (plaintext, explicit allowInsecurePlaintext)'}`
       + `${makeRelay !== undefined ? ' [shared upstream session relay]' : ' [no upstream session relay: base has no browser-session auth]'}`,
     )
+    if (resolved?.renewed === true) {
+      ctx.logger.warn(
+        'dsh-lan-gateway: the self-signed certificate had expired and was replaced with a fresh one '
+        + '— clients that had trusted the old certificate must trust the new one.',
+      )
+    }
   }
 
   const stopGateway = async (): Promise<void> => {
@@ -590,11 +618,12 @@ export function apply(ctx: Context, config: Config): void {
       return {
         ok: true,
         message:
-          `LAN gateway: ${gateway !== undefined ? `LISTENING on 0.0.0.0:${cfg.gatewayPort}` : 'stopped'}`
+          `LAN gateway: ${gateway !== undefined ? `LISTENING on ${gateway.boundAddress()}` : 'stopped'}`
           + `\n- dsh target: 127.0.0.1:${dshPort}`
           + `\n- password: ${state.password !== undefined ? 'set' : 'NOT SET'}`
           + `\n- login required for all sources: true${cfg.lanPasswordless ? ' (LAN/loopback exempt via lanPasswordless)' : ''}`
           + `\n- session epoch: ${state.sessionEpoch}`
+          + `\n- signed-out sessions still held: ${Object.keys(state.revokedSessions ?? {}).length} (each drops when its own cookie would have expired)`
           + `\n- upstream session relay: ${upstreamSessionAvailable ? 'active (dsh browser-session auth present)' : 'absent (older dsh base)'}`
           + `\n- ingress: ${cfg.tlsEnabled ? `TLS (${tlsStatusLine(cfg)})` : cfg.trustedTerminator !== undefined ? `trusted proxy (${cfg.trustedTerminator}, ${resolveSecureCookies(cfg) ? 'TLS' : 'plaintext'} browser ingress)` : encrypted ? 'encrypted' : cfg.allowInsecurePlaintext ? 'PLAINTEXT (explicit allowInsecurePlaintext)' : 'plaintext — will not start'}`
           + `\n- session cookie: ${cfg.cookieName}, ${cfg.cookieMaxAgeDays}d, ${resolveSecureCookies(cfg) ? 'Secure' : 'no Secure attribute (plaintext browser ingress)'}`
@@ -608,7 +637,7 @@ export function apply(ctx: Context, config: Config): void {
       manualOverride = true
       await syncGateway('tool enable')
       return gateway !== undefined
-        ? { ok: true, message: `Gateway enabled: listening on 0.0.0.0:${effective().gatewayPort}` }
+        ? { ok: true, message: `Gateway enabled: listening on ${gateway.boundAddress()}` }
         : { ok: false, message: `Failed to enable gateway: ${lastError ?? 'unknown error'}` }
     },
     async disable(): Promise<ToolResult> {

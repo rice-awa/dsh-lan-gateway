@@ -3,17 +3,23 @@
  * parsing.
  */
 
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  isCertExpired,
   loadCustomCert,
   loadOrCreateSelfSigned,
+  loadOrRenewSelfSigned,
   parseSelfSignedHosts,
   regenerateSelfSigned,
   tlsDir,
 } from '../src/tls.ts'
+
+afterEach(() => {
+  vi.useRealTimers()
+})
 
 describe('self-signed material', () => {
   it('generates once and reuses the persisted files', () => {
@@ -55,6 +61,47 @@ describe('self-signed material', () => {
     const home = join(dir, 'fake-home')
     try {
       expect(() => loadOrCreateSelfSigned({ hosts: [], days: 30 }, home)).toThrow(/at least one host/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('reports whether a certificate has lapsed', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-gw-tls-expiry-'))
+    const home = join(dir, 'fake-home')
+    try {
+      const { material } = loadOrCreateSelfSigned({ hosts: ['localhost'], days: 30 }, home)
+      expect(isCertExpired(material.cert)).toBe(false)
+      // Asked from a day past notAfter, the same certificate reads as expired.
+      expect(isCertExpired(material.cert, Date.now() + 31 * 86_400_000)).toBe(true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('reuses a live certificate but replaces a lapsed one', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-gw-tls-renew-'))
+    const home = join(dir, 'fake-home')
+    const opts = { hosts: ['localhost'], days: 30 }
+    try {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'))
+      const first = loadOrRenewSelfSigned(opts, home)
+      expect(first.renewed).toBe(false)
+
+      // Halfway through the validity window the persisted pair is reused.
+      vi.setSystemTime(new Date('2026-01-15T00:00:00Z'))
+      const reused = loadOrRenewSelfSigned(opts, home)
+      expect(reused.renewed).toBe(false)
+      expect(reused.material.cert).toBe(first.material.cert)
+
+      // Past notAfter a fresh pair is minted and written to disk: a lapsed
+      // certificate is one browsers refuse outright, so it is not served.
+      vi.setSystemTime(new Date('2026-03-15T00:00:00Z'))
+      const renewed = loadOrRenewSelfSigned(opts, home)
+      expect(renewed.renewed).toBe(true)
+      expect(renewed.material.cert).not.toBe(first.material.cert)
+      expect(readFileSync(join(tlsDir(home), 'selfsigned.crt'), 'utf8')).toBe(renewed.material.cert)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
