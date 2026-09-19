@@ -72,6 +72,27 @@ export function loadOrCreateSelfSigned(
 }
 
 /**
+ * Load the self-signed material a listener should serve: generate it on first
+ * use, reuse the persisted pair otherwise, and replace a persisted certificate
+ * whose validity has already lapsed.
+ *
+ * Nothing renews a self-signed certificate in place, and a browser refuses a
+ * lapsed one outright, so without this a certificate that ran out would keep
+ * being served until an operator happened to read the expiry date out of
+ * `status` and act on it. Renewing mints a fresh key, so a client that had
+ * trusted the old certificate has to trust the new one — but that is the case
+ * either way, the old one having lapsed.
+ */
+export function loadOrRenewSelfSigned(
+  opts: SelfSignedTlsOptions,
+  home: string = homedir(),
+): { material: TlsMaterial; renewed: boolean } {
+  const { material, created } = loadOrCreateSelfSigned(opts, home)
+  if (created || !isCertExpired(material.cert)) return { material, renewed: false }
+  return { material: regenerateSelfSigned(opts, home), renewed: true }
+}
+
+/**
  * Force-regenerate the self-signed certificate (new key + cert), replacing
  * the persisted files. Used by `lan_gateway tls-regenerate`.
  */
@@ -144,6 +165,18 @@ export interface CertInfo {
   validTo: string
   fingerprint256: string
   san?: string
+}
+
+/**
+ * Whether a PEM certificate's validity window has already closed. A lapsed
+ * certificate is a hard failure browsers will not let the user proceed past,
+ * so the listener replaces one rather than keep serving it.
+ */
+export function isCertExpired(certPem: string, now: number = Date.now()): boolean {
+  const expiresAt = Date.parse(new X509Certificate(certPem).validTo)
+  // An unparseable date reads as "not expired": serving the certificate we were
+  // handed beats discarding it over a date-parsing quirk.
+  return Number.isFinite(expiresAt) && expiresAt <= now
 }
 
 /** Describe a PEM certificate (throws on malformed input). */

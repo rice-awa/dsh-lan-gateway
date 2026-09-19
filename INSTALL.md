@@ -92,7 +92,8 @@ dsh --profile web
 - **包已就位**：`ls ~/.dsh/profiles/web/node_modules/@riceawa/dsh-lan-gateway/lib`
   应看到 `index.js`、`client.js`、`index.d.ts`。
 - **监听开启**：对话里执行 `lan_gateway enable`（首次需先设密码，见下），日志应出现
-  `dsh-lan-gateway: listening on 0.0.0.0:3081 -> 127.0.0.1:<dsh端口>`。
+  `dsh-lan-gateway: listening on [::]:3081 -> 127.0.0.1:<dsh端口>`（主机无 IPv6 时
+  该字段是 `0.0.0.0`；日志报告实际绑定的地址）。
 - **skill 生效**：对话里说「网关状态」，agent 应能调用 `lan_gateway` 工具。
 
 ### 6. 首次使用：设置密码（必做）

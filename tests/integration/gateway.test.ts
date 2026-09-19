@@ -103,7 +103,7 @@ interface HttpResponse {
 }
 
 /** One HTTP request against the gateway (cookie jar optional). */
-function req(port: number, method: string, path: string, opts: { cookie?: string; origin?: string; type?: string; body?: string; extra?: Record<string, string> } = {}): Promise<HttpResponse> {
+function req(port: number, method: string, path: string, opts: { cookie?: string; origin?: string; type?: string; body?: string; extra?: Record<string, string>; host?: string } = {}): Promise<HttpResponse> {
   return new Promise((resolve, reject) => {
     const headers: http.OutgoingHttpHeaders = { host: `127.0.0.1:${port}` }
     if (opts.cookie !== undefined) headers.cookie = opts.cookie
@@ -111,7 +111,7 @@ function req(port: number, method: string, path: string, opts: { cookie?: string
     if (opts.type !== undefined) headers['content-type'] = opts.type
     if (opts.body !== undefined) headers['content-length'] = Buffer.byteLength(opts.body)
     for (const [key, value] of Object.entries(opts.extra ?? {})) headers[key] = value
-    const client = http.request({ host: '127.0.0.1', port, method, path, headers }, (res) => {
+    const client = http.request({ host: opts.host ?? '127.0.0.1', port, method, path, headers }, (res) => {
       const chunks: Buffer[] = []
       res.on('data', (c: Buffer) => chunks.push(c))
       res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') }))
@@ -119,6 +119,15 @@ function req(port: number, method: string, path: string, opts: { cookie?: string
     client.on('error', reject)
     if (opts.body !== undefined) client.write(opts.body)
     client.end()
+  })
+}
+
+/** Whether this host has IPv6 loopback at all (the listener falls back to IPv4 without it). */
+function ipv6Available(): Promise<boolean> {
+  return new Promise((resolve) => {
+    const probe = net.createServer()
+    probe.once('error', () => { resolve(false) })
+    probe.listen(0, '::1', () => { probe.close(() => resolve(true)) })
   })
 }
 
@@ -155,6 +164,7 @@ function setCookieValues(headers: IncomingHttpHeaders): string[] {
 }
 
 const LOGIN = '/__login'
+const LOGOUT = '/__logout'
 
 async function login(port: number, password: string): Promise<HttpResponse> {
   return req(port, 'POST', LOGIN, {
@@ -354,6 +364,104 @@ describe('LanGateway end-to-end against a fake upstream', () => {
       expect(res.status).toBe(200)
       // Forwarding relays the raw target; dsh normalizes it the same way.
       expect(upstream.seen[0]!.url).toBe('/a/../api/chat')
+    } finally {
+      await gateway.close()
+      await upstream.close()
+    }
+  })
+
+  it('row 9d: a trailing slash does not route the gateway\'s own surfaces into the relay', async () => {
+    const upstream = await createUpstream()
+    const { gateway, port } = await startGateway(authedState(), upstream, { source: 'internet' })
+    try {
+      // The login page, not dsh's single-page fallback.
+      const form = await req(port, 'GET', '/__login/')
+      expect(form.status).toBe(200)
+      expect(form.body).toContain('name="password"')
+
+      const issued = await login(port, 'correct horse battery')
+      const jar = cookieJar(issued.headers)
+
+      // The owned prefix is refused rather than relayed with Host rewritten to
+      // loopback, where the plugin's own config route would answer it.
+      const owned = await req(port, 'GET', '/lan-gateway/config/', { cookie: jar })
+      expect(owned.status).toBe(403)
+
+      // And a trailing slash still signs out rather than falling through to
+      // dsh, where POST /__logout/ would be nothing but a 404.
+      const out = await req(port, 'POST', '/__logout/', {
+        cookie: jar,
+        origin: `http://127.0.0.1:${port}`,
+      })
+      expect(out.status).toBe(302)
+      expect((await req(port, 'GET', '/', { cookie: jar })).status).toBe(302)
+
+      expect(upstream.seen).toHaveLength(0)
+    } finally {
+      await gateway.close()
+      await upstream.close()
+    }
+  })
+
+  it('signing out revokes the session that signed out, and only that one', async () => {
+    const upstream = await createUpstream()
+    const { gateway, port } = await startGateway(authedState(), upstream, { source: 'internet' })
+    try {
+      const first = await login(port, 'correct horse battery')
+      const second = await login(port, 'correct horse battery')
+      const jarA = cookieJar(first.headers)
+      const jarB = cookieJar(second.headers)
+      // Every login mints its own session id, so the two are independently
+      // revocable. (They differ as values too: the id is part of the payload.)
+      expect(jarA).not.toBe(jarB)
+      expect((await req(port, 'GET', '/', { cookie: jarA })).status).toBe(200)
+
+      const out = await req(port, 'POST', LOGOUT, {
+        cookie: jarA,
+        origin: `http://127.0.0.1:${port}`,
+      })
+      expect(out.status).toBe(302)
+
+      // Clearing the browser's cookie is not the point: a replay of the same
+      // value is refused from now on, without an epoch bump to do it.
+      const replayed = await req(port, 'GET', '/', { cookie: jarA })
+      expect(replayed.status).toBe(302)
+      expect(replayed.headers.location).toBe(LOGIN)
+
+      // The other session is untouched — signing out is not a global revoke.
+      const other = await req(port, 'GET', '/', { cookie: jarB })
+      expect(other.status).toBe(200)
+    } finally {
+      await gateway.close()
+      await upstream.close()
+    }
+  })
+
+  it('signing out without a session is a no-op, not an error', async () => {
+    const upstream = await createUpstream()
+    const { gateway, port } = await startGateway(authedState(), upstream, { source: 'internet' })
+    try {
+      const out = await req(port, 'POST', LOGOUT, { origin: `http://127.0.0.1:${port}` })
+      expect(out.status).toBe(302)
+    } finally {
+      await gateway.close()
+      await upstream.close()
+    }
+  })
+
+  it('reaches IPv6 loopback clients on the same port', async (ctx) => {
+    // The listener binds the unspecified address, which node resolves to `::`
+    // (dual-stack) where IPv6 exists and to 0.0.0.0 where it does not. Without
+    // it, a gateway that classifies `::1` and `fe80::` can never be reached
+    // over either.
+    if (!await ipv6Available()) ctx.skip()
+    const upstream = await createUpstream()
+    const { gateway, port } = await startGateway(authedState(), upstream, { source: 'internet' })
+    try {
+      const res = await req(port, 'GET', '/', { host: '::1' })
+      expect(res.status).toBe(302)
+      expect(res.headers.location).toBe(LOGIN)
+      expect(upstream.seen).toHaveLength(0)
     } finally {
       await gateway.close()
       await upstream.close()

@@ -9,8 +9,9 @@ user-invocable: true
 
 The `dsh-lan-gateway` plugin lets the DeepSeek Harness web GUI be reached from the
 LAN and the wider internet. dsh itself binds only to loopback (the web CLI
-hard-refuses `0.0.0.0`), so this plugin runs its own reverse-proxy gateway on
-`0.0.0.0` that forwards to the loopback web server while rewriting Host/Origin.
+hard-refuses `0.0.0.0`), so this plugin runs its own reverse-proxy gateway on the
+unspecified address — both families, so IPv6 clients reach it too — forwarding to
+the loopback web server while rewriting Host/Origin.
 
 Since v0.5.0 the model is **default-deny** (post-QVD-2026-57410 hardening):
 
@@ -31,8 +32,8 @@ Since v0.5.0 the model is **default-deny** (post-QVD-2026-57410 hardening):
 Do not edit state files by hand — use the `lan_gateway` tool.
 
 - `lan_gateway` with `command: "status"` — is it listening, on which port, toward
-  which dsh port, password set?, session epoch, upstream-session relay state,
-  ingress encryption, last error.
+  which dsh port, password set?, session epoch, how many signed-out sessions are
+  still held, upstream-session relay state, ingress encryption, last error.
 - `lan_gateway` with `command: "enable"` — start listening. If it refuses (no
   password, legacy `authRequired: false`, plaintext without opt-in, `lanPasswordless`
   without a session-capable base), the message tells you what to change.
@@ -72,3 +73,6 @@ once (passwords and sessions travel in clear).
   without an Origin) does not.
 - Sessions don't survive a password change / `rotate-secret`: that is by design —
   the revocation epoch advanced and all cookies (and live WebSockets) were revoked.
+  Signing out is narrower: it revokes only the session that signed out, so that
+  session's cookie is dead even if a copy of it was kept elsewhere, while the
+  user's other devices stay signed in.

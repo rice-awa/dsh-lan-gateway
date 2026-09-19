@@ -12,7 +12,7 @@
   <a href="https://awesome-dsh-plugin.com"><img src="https://awesome-dsh-plugin.com/badge.svg" alt="awesome · DSH plugin" /></a>
 </p>
 
-`dsh web` 明确拒绝 `--host 0.0.0.0`，以免把远程代码执行暴露到网络。本插件的做法是让 dsh 继续只绑 `127.0.0.1`，另起一个监听 `0.0.0.0` 的反向代理，转发到 loopback 端口并改写 `Host` / `Origin`。
+`dsh web` 明确拒绝 `--host 0.0.0.0`，以免把远程代码执行暴露到网络。本插件的做法是让 dsh 继续只绑 `127.0.0.1`，另起一个反向代理监听未指定地址（双栈，IPv4 与 IPv6 客户端都可接入），转发到 loopback 端口并改写 `Host` / `Origin`。
 
 默认拒绝：loopback、LAN、公网三种来源都要先在网关登录页取得 HMAC 会话 cookie，LAN 免密需要显式打开 `lanPasswordless`，默认关闭。底座为 dsh ≥ 0.1.2-rc.1 时（含 QVD-2026-57410 的上游修复），网关在进程内中继一条共享上游会话，上游自身的授权仍然把关每个请求，网关只决定谁可以使用这条会话。
 
@@ -44,7 +44,7 @@ cd dsh-lan-gateway
 pnpm install
 pnpm build          # host → lib/index.js
 pnpm build:client   # client → lib/client.js
-pnpm test           # 93 项
+pnpm test           # 117 项
 ```
 
 仓库里还有一个 [lan-gateway](skills/lan-gateway.md) 技能，安装后可直接在 dsh 对话里说「设置网关密码为 …」「开启远程访问」，agent 会调用 `lan_gateway` 工具完成，密码以参数传入，不写入配置，也不回显。安装方式见 [INSTALL.md](INSTALL.md#for-agents完整安装流程)。
@@ -59,7 +59,7 @@ dsh plugin --profile web add github:mexiaosqwq/dsh-web-mobile
 
 ```bash
 lan_gateway enable            # 开启网关（需先满足启动条件，否则给出迁移文案）
-lan_gateway status            # 端口 / 目标 / 密码 / 会话 epoch / 中继状态 / 入口加密方式 / 上次错误
+lan_gateway status            # 端口 / 目标 / 密码 / 会话 epoch / 已登出会话数 / 中继状态 / 入口加密方式 / 上次错误
 lan_gateway set-password      # 设置登录密码（≥8 位，改动会让所有已签发会话立即失效）
 lan_gateway rotate-secret     # 轮换会话密钥，作废全部登录 cookie 与已建立的 WebSocket
 lan_gateway tls-regenerate    # 换发自签名证书（tlsMode=self-signed 时）
@@ -75,7 +75,7 @@ lan_gateway disable           # 关闭
 | 键 | 默认值 | 说明 |
 | --- | --- | --- |
 | `enabled` | `false` | 是否在启动时监听网络端口 |
-| `gatewayPort` | `3081` | 网关监听端口（`0.0.0.0`） |
+| `gatewayPort` | `3081` | 网关监听端口（未指定地址 / 双栈） |
 | `dshTargetPort` | 跟随 `ctx.webServer.port` | 转发到的 dsh loopback 端口 |
 | `lanCidrs` | RFC1918 + link-local（见下） | 视为 LAN 的网段，仅在 `lanPasswordless` 开启时用作豁免匹配集 |
 | `lanPasswordless` | `false` | LAN/loopback 来源跳过网关登录页（上游会话中继仍把关） |
@@ -86,7 +86,7 @@ lan_gateway disable           # 关闭
 | `tlsSelfSignedHosts` | `localhost` | 自签名证书的 SAN（逗号分隔的域名 / IP） |
 | `tlsCertPath` | — | `custom` 模式：PEM 证书（或证书链）绝对路径 |
 | `tlsKeyPath` | — | `custom` 模式：PEM 私钥绝对路径 |
-| `tlsCertMaxAgeDays` | `825` | 自签名证书有效期（天） |
+| `tlsCertMaxAgeDays` | `825` | 自签名证书有效期（天），见下「证书有效期」 |
 | `allowInsecurePlaintext` | `false` | 允许明文 HTTP 监听（见下「入口加密」） |
 | `trustedTerminator` | — | 声明一个受信 TLS 终止代理标识，视为加密入口（如 `nginx`） |
 | `secureCookies` | 自动 | 会话 cookie 的 `Secure` 属性显式开关，默认按 `tlsEnabled` 或 `trustedTerminator` 推断（见下） |
@@ -131,7 +131,13 @@ lan_gateway disable           # 关闭
     tlsKeyPath: /etc/letsencrypt/live/example.com/privkey.pem
 ```
 
-自签名证书在首次启用 TLS 时生成一次，写入 `~/.dsh/lan-gateway/tls/`（`selfsigned.crt` / `selfsigned.key`，0600），之后重启复用。更换证书使用 `lan_gateway tls-regenerate`，它会换掉密钥并热重启监听器。
+自签名证书在首次启用 TLS 时生成一次，写入 `~/.dsh/lan-gateway/tls/`（`selfsigned.crt` / `selfsigned.key`，0600），之后重启复用。更换证书使用 `lan_gateway tls-regenerate`，它会换掉密钥并热重启监听器。已到期的证书在启动时自动换发并记一条 warning。
+
+### 证书有效期
+
+默认有效期 825 天。常见的 398 天上限只约束链到平台预装根 CA 的证书，Apple 明确豁免「由用户或管理员添加的根 CA」签发的证书（[support.apple.com/en-us/102028](https://support.apple.com/en-us/102028)），而自签证书必然是这样一条根——没有任何系统预装它。825 天则是 Apple 对 TLS 服务器证书给出的上限（[support.apple.com/en-us/103769](https://support.apple.com/en-us/103769)），默认值取在该上限之内。
+
+自签证书要么被点击通过、要么被手工信任，因此缩短有效期没有收益，每次到期反而要重新信任一次。需要更短的窗口时用 `tlsCertMaxAgeDays` 自行调整。
 
 监听器自身是 HTTPS 时，网关的响应（登录页 / 重定向 / 拒绝）带 HSTS。
 
@@ -160,7 +166,7 @@ lan_gateway disable           # 关闭
 - **LAN 免密是显式 opt-in**。`lanPasswordless: true` 只让命中 `lanCidrs` 或 loopback 的来源跳过网关自己的登录页；底座 ≥ 0.1.2-rc.1 时上游会话仍把关每个请求。底座没有浏览器会话认证时这个开关拒绝启用，否则等同于把 QVD-2026-57410 原样恢复。
 - **共享上游会话中继**（dsh ≥ 0.1.2-rc.1）。dsh 不再信任回环 Host，要求出示 HMAC 签名的 `dsh-auth-*` cookie。插件经 `connection` 服务拿到启动令牌，在回环传输上做一次浏览器等价的令牌换取，取得 cookie 后中继到每个转发请求；上游一旦 401 就丢弃这条会话并重新换取。这仍是「单密码 = 单操作者」：通过网关登录的用户共用同一条上游会话，持钥的上游才是真正的授权主体。
 - **登录页**。`/__login` 由网关独占、不转发。密码以 scrypt 校验，每写一次重新加盐；登录尝试按来源限流（5 次 / 分钟）。
-- **会话 cookie** 是 `payload.signature` 结构（HMAC-SHA256），带撤销 epoch，`HttpOnly; SameSite=Strict`。改密、清密、`rotate-secret` 都会递增 epoch，作废全部已签发 cookie 并断开已建立的 WebSocket，客户端需要重新登录。清空密码会直接停止监听。
+- **会话 cookie** 是 `payload.signature` 结构（HMAC-SHA256），带撤销 epoch 与逐会话 id，`HttpOnly; SameSite=Strict`。登出撤销的是当前这条会话：它建立的 WebSocket 一并断开，其他设备不受影响。改密、清密、`rotate-secret` 递增 epoch，作废全部已签发 cookie 并断开全部已建立的 WebSocket，客户端需要重新登录。清空密码会直接停止监听。
 - **管理面不外泄**。`/lan-gateway/*`（含配置路由）由网关独占、一律 403 不转发，远程访问者无法借网关改写 Host 触及本机 loopback 的配置接口。原生 `/lan-gateway/config` 只应答回环 Host 且同源的请求。远程管理走 `lan_gateway` 工具。
 - **CSRF 围栏**（HTTP 与 WebSocket）。网关把 Origin 改写回 loopback，会蒙蔽 dsh 自身的 CSRF 防线，所以在改写前对每个转发请求自检：`sec-fetch-site: cross-site` 直接拒；Origin 必须匹配访问者实际使用的网关权威来源；状态变更方法与 WebSocket 升级请求必须携带同源 Origin，否则 403。
 - **未设置密码时拒绝监听**，与来源无关。
@@ -182,19 +188,19 @@ client bundle 在模块级给 `Crypto` 原型补一个基于 `crypto.getRandomVa
 ## 开发
 
 ```bash
-pnpm test        # 93 项
+pnpm test        # 117 项
 pnpm typecheck   # tsc 双端（host + client）
 ```
 
 ```
-✓ tests/gateway.test.ts               (27) 分类 / HMAC cookie / epoch / 密码状态 / 限流
+✓ tests/gateway.test.ts               (40) 分类 / HMAC cookie / epoch / 逐会话撤销 / 密码状态 / 限流
 ✓ tests/start-guard.test.ts           (19) fail-closed 启动守卫 / 配置路由回环围栏 /
                                            Secure cookie 属性推断（含 null 清除路径）
-✓ tests/integration/gateway.test.ts   (17) 真实网关端到端：全来源登录 / LAN 豁免 /
-                                           跨站 403 / 升级拒绝 / cookie 属性 / epoch 撤销 / 会话中继
+✓ tests/integration/gateway.test.ts   (26) 真实网关端到端：全来源登录 / LAN 豁免 / 跨站 403 / 升级拒绝 /
+                                           cookie 属性 / epoch 撤销 / 逐会话登出 / 尾斜杠 / IPv6 / 会话中继
 ✓ tests/uuid-shim.test.ts             ( 3) 不安全源补丁 / 安全源 no-op / v4 正确性
 ✓ tests/x509.test.ts                  ( 6) 自签名证书 DER/SAN/签名/TLS 握手
-✓ tests/tls.test.ts                   ( 7) 证书持久化 / 重生成 / 自定义证书加载
+✓ tests/tls.test.ts                   ( 9) 证书持久化 / 到期换发 / 重生成 / 自定义证书加载
 ✓ tests/upstream-session.test.ts      ( 8) 真实回环令牌换取：cookie 名匹配 / 拒绝后重换 /
                                            invalidate 重获取 / 日志播报 / 保住已持有会话
 ✓ tests/settings-card.test.ts         ( 6) 设置页字段编解码：三态 auto ↔ false 不可混淆
@@ -232,7 +238,7 @@ gh release create v0.5.4 --generate-notes ./*.tgz # 可选：Release + tgz 附�
 - [LAN 网关安全评估](docs/security/SECURITY-AUDIT.md)：0.4.0 时代的 F1–F5 审计快照与 13 个隔离观察，顶部标注了 0.5.0 的修复状态。
 - [QVD-2026-57410 修复方案](docs/security/qvd-2026-57410-fix-plan.md)：方案全文 + §15 实施状态。
 - [上游研究](docs/security/qvd-2026-57410-research.md)：公开通告、上游提交与版本核对。
-- [0.5.4 复审与修复清单](docs/security/audit-2026-09-19-fix-list.md)：0.5.3 的实现细节复审（G1–G8）与修复记录。
+- [0.5.4 复审与修复清单](docs/security/audit-2026-09-19-fix-list.md)：0.5.3 的实现细节复审（G1–G12）与修复记录。
 
 ## 许可
 

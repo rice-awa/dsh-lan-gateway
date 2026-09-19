@@ -120,6 +120,20 @@ function base64url(input: Buffer): string {
   return input.toString('base64url')
 }
 
+/** The claims a verified session cookie carries. */
+export interface SessionClaims {
+  /** Epoch millis at which the session expires. */
+  exp: number
+  /** The revocation epoch the cookie was minted under. */
+  epoch: number
+  /**
+   * Per-session id. Present on cookies minted from 0.5.4 on, which is what
+   * lets one session be retired on its own (sign-out) instead of retiring
+   * every session the password authorized. Absent on older cookies.
+   */
+  sid?: string
+}
+
 /**
  * Issue a signed session cookie value.
  * @param secret - the HMAC signing secret (base64 string).
@@ -128,12 +142,53 @@ function base64url(input: Buffer): string {
  *   cookie whose epoch no longer matches the live state is rejected by
  *   {@link verifyCookie}. Defaults to 0 (epoch-less, legacy) for callers that
  *   do not participate in revocation.
+ * @param sid - optional per-session id (see {@link SessionClaims.sid}).
  * @returns a `payload.signature` string suitable for the cookie value.
  */
-export function signCookie(secret: string, expiresMs: number, epoch: number = 0): string {
-  const payload = base64url(Buffer.from(JSON.stringify({ exp: expiresMs, epoch })))
+export function signCookie(secret: string, expiresMs: number, epoch: number = 0, sid?: string): string {
+  const claims = sid === undefined ? { exp: expiresMs, epoch } : { exp: expiresMs, epoch, sid }
+  const payload = base64url(Buffer.from(JSON.stringify(claims)))
   const sig = createHmac('sha256', secret).update(payload).digest('base64url')
   return `${payload}.${sig}`
+}
+
+/**
+ * Verify a cookie's signature, expiry and epoch.
+ * @returns the claims it carries, or undefined when it is not a valid session.
+ */
+export function verifySession(
+  secret: string,
+  value: string | undefined,
+  now: number,
+  epoch: number = 0,
+): SessionClaims | undefined {
+  if (value === undefined) return undefined
+  const dot = value.indexOf('.')
+  if (dot === -1) return undefined
+  const payload = value.slice(0, dot)
+  const sig = value.slice(dot + 1)
+  const expected = createHmac('sha256', secret).update(payload).digest()
+  let actual: Buffer
+  try {
+    actual = Buffer.from(sig, 'base64url')
+  } catch {
+    return undefined
+  }
+  if (expected.length !== actual.length) return undefined
+  if (!timingSafeEqual(expected, actual)) return undefined
+  try {
+    const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as Partial<SessionClaims>
+    if (typeof decoded.exp !== 'number' || decoded.exp <= now) return undefined
+    const cookieEpoch = typeof decoded.epoch === 'number' ? decoded.epoch : 0
+    if (cookieEpoch !== epoch) return undefined
+    return {
+      exp: decoded.exp,
+      epoch: cookieEpoch,
+      ...(typeof decoded.sid === 'string' ? { sid: decoded.sid } : {}),
+    }
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -147,28 +202,7 @@ export function verifyCookie(
   now: number,
   epoch: number = 0,
 ): boolean {
-  if (value === undefined) return false
-  const dot = value.indexOf('.')
-  if (dot === -1) return false
-  const payload = value.slice(0, dot)
-  const sig = value.slice(dot + 1)
-  const expected = createHmac('sha256', secret).update(payload).digest()
-  let actual: Buffer
-  try {
-    actual = Buffer.from(sig, 'base64url')
-  } catch {
-    return false
-  }
-  if (expected.length !== actual.length) return false
-  if (!timingSafeEqual(expected, actual)) return false
-  try {
-    const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as { exp?: unknown; epoch?: unknown }
-    if (typeof decoded.exp !== 'number' || decoded.exp <= now) return false
-    const cookieEpoch = typeof decoded.epoch === 'number' ? decoded.epoch : 0
-    return cookieEpoch === epoch
-  } catch {
-    return false
-  }
+  return verifySession(secret, value, now, epoch) !== undefined
 }
 
 /**

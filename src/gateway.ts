@@ -1,6 +1,7 @@
 /**
- * The reverse-proxy gateway: a `node:http(s)` server bound to `0.0.0.0` that
- * forwards every request to the loopback dsh web server.
+ * The reverse-proxy gateway: a `node:http(s)` server bound to the unspecified
+ * address (dual-stack, so IPv6 clients reach it too) that forwards every
+ * request to the loopback dsh web server.
  *
  * Security model (post-QVD / session-base):
  * - Source is classified from `socket.remoteAddress` only (never
@@ -23,22 +24,25 @@
  *   authority-bound session cookie). The gateway therefore relays one shared
  *   upstream session acquired through the launch-token exchange and replays it
  *   on every forwarded request. See `upstream-session.ts`.
- * - Sessions carry a revocation epoch: a password change or secret rotation
- *   bumps the epoch, every previously issued cookie dies, and established
- *   WebSockets are torn down so the client re-authenticates.
+ * - Sessions are revocable two ways. Each carries a random id, so signing out
+ *   retires exactly that session and the WebSockets it opened; and each
+ *   carries a revocation epoch, so a password change or secret rotation kills
+ *   every session at once — cookie, socket, and all.
  *
  * @module @riceawa/dsh-lan-gateway/gateway
  */
 
 import http from 'node:http'
 import https from 'node:https'
+import { randomBytes } from 'node:crypto'
 import type { Duplex } from 'node:stream'
 import {
   classifySource,
   originMatchesHost,
   RateLimiter,
   signCookie,
-  verifyCookie,
+  verifySession,
+  type SessionClaims,
   type SourceClass,
 } from './auth.ts'
 import {
@@ -49,12 +53,17 @@ import {
   serveLoginGet,
   type LoginPageOptions,
 } from './login.ts'
-import { verifyPassword, type GatewayState } from './state.ts'
+import {
+  isSessionRevoked,
+  revokeSession,
+  verifyPassword,
+  type GatewayState,
+} from './state.ts'
 import type { UpstreamSession } from './upstream-session.ts'
 
 /** Configuration the gateway needs at listen time. */
 export interface GatewayConfig {
-  /** Port to bind on 0.0.0.0. */
+  /** Port to bind on the unspecified address (dual-stack; see {@link LanGateway.listen}). */
   gatewayPort: number
   /** The loopback dsh web server port to forward to. */
   dshPort: number
@@ -74,6 +83,12 @@ export interface GatewayConfig {
   classifySource?: (req: http.IncomingMessage) => SourceClass
   /** Optional shared upstream session relayed onto every forwarded request. */
   upstreamSession?: UpstreamSession
+  /**
+   * Called after the gateway revokes a session itself (sign-out), so the plugin
+   * can persist a state the gateway changed on its own. The gateway has already
+   * installed it locally by then.
+   */
+  onStateChange?: (state: GatewayState) => void
 }
 
 const DEFAULT_BODY_LIMIT_BYTES = 64 * 1024
@@ -148,8 +163,9 @@ function isOwnedPath(pathname: string): boolean {
 }
 
 /**
- * The pathname a request is routed by, resolved the way dsh's router resolves
- * it: WHATWG URL parsing, which strips the query and collapses dot segments.
+ * The pathname a request is routed by: the one dsh's router resolves it to
+ * (WHATWG URL parsing, which strips the query and collapses dot segments),
+ * with trailing slashes then removed for the gateway's own surface tests.
  *
  * The decision paths below (owned prefix, login, logout) must use this rather
  * than the raw request target. dsh normalizes before matching, so a raw-string
@@ -157,15 +173,27 @@ function isOwnedPath(pathname: string): boolean {
  * path by string prefix, stays in the relay, and lands on the plugin's own
  * config route once Host has been rewritten to loopback. Forwarding still
  * relays the raw target: dsh applies the same normalization itself.
+ *
+ * WHATWG parsing does not drop a trailing slash, and neither does dsh's
+ * router, so `/__login/` is not the login page to either of them. The gateway
+ * recognizes its own surfaces there anyway: `/__logout/` must still sign out,
+ * and `/lan-gateway/config/` must be refused rather than relayed into dsh's
+ * single-page fallback. Blocking a trailing-slash spelling of an owned prefix
+ * errs toward refusing, which costs nothing — no upstream route lives under it.
  */
 function pathOf(url: string): string {
   try {
-    return new URL(url, 'http://gateway.invalid').pathname
+    return new URL(url, 'http://gateway.invalid').pathname.replace(/\/+$/, '') || '/'
   } catch {
     // Unparseable here means unparseable for dsh too; the raw target routes
     // nowhere and is relayed as-is.
     return url
   }
+}
+
+/** A fresh per-session id: 128 random bits, URL-safe. */
+function newSessionId(): string {
+  return randomBytes(16).toString('base64url')
 }
 
 /**
@@ -178,8 +206,14 @@ export class LanGateway {
   private readonly loginLimiter = new RateLimiter(LOGIN_ATTEMPTS_LIMIT, LOGIN_ATTEMPTS_WINDOW_MS)
   private state: GatewayState
   private disposed = false
-  /** Established WebSockets (upgraded client sockets), torn down on session-epoch change. */
-  private readonly activeDuplexes = new Set<Duplex>()
+  /**
+   * Established WebSockets (upgraded client sockets), each keyed by the session
+   * that opened it. A socket outlives the request that authenticated it, so it
+   * has to be closable by session: on an epoch bump every socket dies, and on
+   * sign-out only that session's. The value is undefined for a cookie minted
+   * before per-session ids existed, which only a wholesale revocation reaches.
+   */
+  private readonly activeDuplexes = new Map<Duplex, string | undefined>()
 
   constructor(
     private readonly config: GatewayConfig,
@@ -205,7 +239,14 @@ export class LanGateway {
     this.state = state
   }
 
-  /** Start listening; rejects if the port is already in use. */
+  /**
+   * Start listening on the configured port. The listener is dual-stack: with
+   * no host given, node binds the unspecified IPv6 address `::` — which also
+   * accepts IPv4 clients, arriving as `::ffff:a.b.c.d` for the classifier to
+   * unwrap — when the host has IPv6, and falls back to `0.0.0.0` when it does
+   * not. Binding IPv4 only used to leave every IPv6 client (including `::1`)
+   * unable to reach a gateway that classifies them.
+   */
   async listen(): Promise<void> {
     return new Promise((resolve, reject) => {
       const onError = (err: Error): void => {
@@ -218,8 +259,16 @@ export class LanGateway {
       }
       this.server.once('error', onError)
       this.server.once('listening', onListening)
-      this.server.listen(this.config.gatewayPort, '0.0.0.0')
+      this.server.listen(this.config.gatewayPort)
     })
+  }
+
+  /** The address actually bound, for logs and status (never a claim about it). */
+  boundAddress(): string {
+    const address = this.server.address()
+    if (address === null || typeof address === 'string') return `port ${this.config.gatewayPort}`
+    const host = address.family === 'IPv6' ? `[${address.address}]` : address.address
+    return `${host}:${address.port}`
   }
 
   /** Close the server, drop upgraded sockets, and stop accepting connections. */
@@ -234,14 +283,23 @@ export class LanGateway {
   }
 
   private destroyActiveDuplexes(): void {
-    for (const socket of this.activeDuplexes) {
+    for (const socket of this.activeDuplexes.keys()) {
       socket.destroy()
     }
     this.activeDuplexes.clear()
   }
 
-  private trackDuplex(socket: Duplex): void {
-    this.activeDuplexes.add(socket)
+  /** Close the sockets one session opened, so signing out ends its live streams too. */
+  private destroyDuplexesFor(sid: string): void {
+    for (const [socket, owner] of this.activeDuplexes) {
+      if (owner !== sid) continue
+      this.activeDuplexes.delete(socket)
+      socket.destroy()
+    }
+  }
+
+  private trackDuplex(socket: Duplex, sid: string | undefined): void {
+    this.activeDuplexes.set(socket, sid)
     socket.on('close', () => {
       this.activeDuplexes.delete(socket)
     })
@@ -266,15 +324,27 @@ export class LanGateway {
     return undefined
   }
 
-  /** Whether a request carries a session valid under the current epoch. */
-  private authorized(req: http.IncomingMessage): boolean {
+  /**
+   * The session a request carries, or undefined when it presents none, presents
+   * one that no longer verifies under the current epoch, or presents one whose
+   * id has been signed out.
+   */
+  private session(req: http.IncomingMessage): SessionClaims | undefined {
     const cookie = this.sessionCookie(req)
-    return cookie !== undefined && verifyCookie(
+    if (cookie === undefined) return undefined
+    const claims = verifySession(
       this.state.cookieSecret,
       cookie,
       Date.now(),
       this.state.sessionEpoch,
     )
+    if (claims === undefined) return undefined
+    return isSessionRevoked(this.state, claims.sid) ? undefined : claims
+  }
+
+  /** Whether a request carries a session valid under the current epoch. */
+  private authorized(req: http.IncomingMessage): boolean {
+    return this.session(req) !== undefined
   }
 
   /** Whether this source must present a gateway session (default: everyone). */
@@ -402,7 +472,13 @@ export class LanGateway {
       }
       const maxAgeSeconds = this.config.cookieMaxAgeDays * 86_400
       const expiresMs = Date.now() + maxAgeSeconds * 1000
-      const cookie = signCookie(this.state.cookieSecret, expiresMs, this.state.sessionEpoch)
+      // Every session gets its own id so signing out can retire this one alone.
+      const cookie = signCookie(
+        this.state.cookieSecret,
+        expiresMs,
+        this.state.sessionEpoch,
+        newSessionId(),
+      )
       res.writeHead(302, {
         location: '/',
         ...this.securityHeaders(),
@@ -420,7 +496,16 @@ export class LanGateway {
     })
   }
 
-  /** POST /__logout: sign an immediately-expired cookie and bounce to / . */
+  /**
+   * POST /__logout: revoke this session and clear the cookie.
+   *
+   * The session is stateless, so clearing the cookie only stops the browser
+   * that ran the sign-out; a copy of the same value held anywhere else would
+   * keep working until it expired. Revoking the id in the cookie retires that
+   * one session for good, and leaves the account's other sessions — other
+   * devices, other browsers — alone. Bumping the session epoch here would be
+   * the blunter instrument: it signs out every session there is.
+   */
   private handleLogout(req: http.IncomingMessage, res: http.ServerResponse): void {
     if (req.method !== 'POST') {
       res.writeHead(405, { allow: 'POST' })
@@ -432,6 +517,12 @@ export class LanGateway {
       res.writeHead(403, this.securityHeaders())
       res.end('forbidden')
       return
+    }
+    const claims = this.session(req)
+    if (claims?.sid !== undefined) {
+      this.state = revokeSession(this.state, claims.sid, claims.exp)
+      this.config.onStateChange?.(this.state)
+      this.destroyDuplexesFor(claims.sid)
     }
     res.writeHead(302, {
       location: '/',
@@ -552,7 +643,10 @@ export class LanGateway {
       return
     }
 
-    if (this.requiresLogin(source) && !this.authorized(req)) {
+    // The session is read once: the socket this upgrade ends up holding stays
+    // attributable to it, so signing that session out can close the socket.
+    const claims = this.session(req)
+    if (this.requiresLogin(source) && claims === undefined) {
       refuse(401)
       return
     }
@@ -578,7 +672,7 @@ export class LanGateway {
       headers,
     })
     proxyReq.on('upgrade', (proxyRes, proxySocket, proxyHead) => {
-      this.trackDuplex(socket)
+      this.trackDuplex(socket, claims?.sid)
       // node's http client has already consumed the 101 response headers, so
       // reconstruct them on the client socket before splicing.
       const statusLine = `HTTP/1.1 ${proxyRes.statusCode ?? 101} ${proxyRes.statusMessage ?? 'Switching Protocols'}\r\n`
