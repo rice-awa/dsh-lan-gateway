@@ -45,7 +45,11 @@ import type { Context } from '@deepseek-ai/cordis'
 import { randomBytes } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'http'
 import z from '@deepseek-ai/schemastery'
-import type { SettingsProvider, SettingsScope } from '@deepseek-ai/dsh-settings'
+// Type-only: the `settings` service (0.1.7 addresses a write by profile entry
+// id) and the Loader's `fiber.entry`, which is where this plugin reads its own
+// entry id from.
+import type SettingsService from '@deepseek-ai/dsh-settings'
+import type {} from '@deepseek-ai/cordis-plugin-loader'
 import { DEFAULT_LAN_CIDR_STRINGS, originMatchesHost } from './auth.ts'
 import {
   CONFIG_FIELD_KEYS,
@@ -209,34 +213,111 @@ export interface Config {
   secureCookies?: boolean
 }
 
-/**
- * The `lan-gateway` user-settings namespace, mirroring the composition schema.
- * A plain string literal: dsh-settings dropped the `settingsNamespace()` brand
- * helper in 0.1.2-rc.1 and `register` validates the literal itself, so this
- * shape works against both that release line and the older branded one.
- */
-const NS = 'lan-gateway'
+/** A `.volatile()` config field as the Loader hands it to `apply`. */
+export interface ConfigRef<T> {
+  /** The current value; updated in place when the profile entry is written. */
+  get(): T
+}
 
-/** Schemastery configuration validated by the Loader. */
-export const Config: z<Config> = z.object({
-  enabled: z.boolean().default(false),
-  gatewayPort: z.natural().min(1).max(65535).default(3081),
-  dshTargetPort: z.natural().min(1).max(65535),
-  lanCidrs: z.array(String).default([...DEFAULT_LAN_CIDR_STRINGS]),
-  lanPasswordless: z.boolean().default(false),
-  authRequired: z.boolean().default(true),
-  cookieMaxAgeDays: z.natural().min(1).max(365).default(7),
-  cookieName: z.string().default('dsh_gw_auth'),
-  tlsEnabled: z.boolean().default(false),
-  tlsMode: z.union([z.const('self-signed'), z.const('custom')]).default('self-signed'),
-  tlsCertPath: z.string(),
-  tlsKeyPath: z.string(),
-  tlsSelfSignedHosts: z.string().default('localhost'),
-  tlsCertMaxAgeDays: z.natural().min(1).max(3650).default(825),
-  allowInsecurePlaintext: z.boolean().default(false),
-  trustedTerminator: z.string(),
-  secureCookies: z.boolean(),
+/**
+ * The config object `apply` receives: dsh 0.1.7 hands every `.volatile()` field
+ * over as a reference rather than a value, so the plugin reads its live config
+ * through `readConfig`. A field declared optional and left unset resolves to
+ * `undefined` instead of a reference, hence the union inside `ConfigRef`.
+ */
+export type ConfigRefs = { [K in keyof Required<Config>]: ConfigRef<Config[K]> }
+
+/**
+ * Schemastery configuration validated by the Loader.
+ *
+ * Every field is `.volatile()`, which is what lets the Settings service write
+ * it: 0.1.7 projects only volatile fields into forms and refuses an edit to any
+ * other path (`not volatile`). The mark also changes the runtime shape — a
+ * volatile field arrives as a reference (see `ConfigRefs`), never as the plain
+ * value the rest of this file expects — so read it through `readConfig`.
+ */
+export const Config = z.object({
+  enabled: z.boolean().default(false).volatile(),
+  gatewayPort: z.natural().min(1).max(65535).default(3081).volatile(),
+  dshTargetPort: z.natural().min(1).max(65535).volatile(),
+  lanCidrs: z.array(String).default([...DEFAULT_LAN_CIDR_STRINGS]).volatile(),
+  lanPasswordless: z.boolean().default(false).volatile(),
+  authRequired: z.boolean().default(true).volatile(),
+  cookieMaxAgeDays: z.natural().min(1).max(365).default(7).volatile(),
+  cookieName: z.string().default('dsh_gw_auth').volatile(),
+  tlsEnabled: z.boolean().default(false).volatile(),
+  tlsMode: z.union([z.const('self-signed'), z.const('custom')]).default('self-signed').volatile(),
+  tlsCertPath: z.string().volatile(),
+  tlsKeyPath: z.string().volatile(),
+  tlsSelfSignedHosts: z.string().default('localhost').volatile(),
+  tlsCertMaxAgeDays: z.natural().min(1).max(3650).default(825).volatile(),
+  allowInsecurePlaintext: z.boolean().default(false).volatile(),
+  trustedTerminator: z.string().volatile(),
+  secureCookies: z.boolean().volatile(),
 })
+
+/**
+ * Unwrap the config references into the plain values every other function in
+ * this file reads. Called on each access rather than once, because a settings
+ * write updates the references in place.
+ * @param refs - the config object handed to `apply`.
+ * @returns one detached plain snapshot.
+ */
+export function readConfig(refs: ConfigRefs): Config {
+  const dshTargetPort = refs.dshTargetPort?.get()
+  const authRequired = refs.authRequired?.get()
+  const tlsCertPath = refs.tlsCertPath?.get()
+  const tlsKeyPath = refs.tlsKeyPath?.get()
+  const tlsSelfSignedHosts = refs.tlsSelfSignedHosts?.get()
+  const trustedTerminator = refs.trustedTerminator?.get()
+  const secureCookies = refs.secureCookies?.get()
+  return {
+    enabled: refs.enabled.get(),
+    gatewayPort: refs.gatewayPort.get(),
+    lanCidrs: [...refs.lanCidrs.get()],
+    lanPasswordless: refs.lanPasswordless.get(),
+    cookieMaxAgeDays: refs.cookieMaxAgeDays.get(),
+    cookieName: refs.cookieName.get(),
+    tlsEnabled: refs.tlsEnabled.get(),
+    tlsMode: refs.tlsMode.get(),
+    tlsCertMaxAgeDays: refs.tlsCertMaxAgeDays.get(),
+    allowInsecurePlaintext: refs.allowInsecurePlaintext.get(),
+    // `exactOptionalPropertyTypes` is on, so an absent optional key must stay
+    // absent rather than be assigned `undefined`. Every field here has a schema
+    // default or is genuinely optional, so an absent reference means unset.
+    ...(dshTargetPort !== undefined ? { dshTargetPort } : {}),
+    ...(authRequired !== undefined ? { authRequired } : {}),
+    ...(tlsCertPath !== undefined ? { tlsCertPath } : {}),
+    ...(tlsKeyPath !== undefined ? { tlsKeyPath } : {}),
+    ...(tlsSelfSignedHosts !== undefined ? { tlsSelfSignedHosts } : {}),
+    ...(trustedTerminator !== undefined ? { trustedTerminator } : {}),
+    ...(secureCookies !== undefined ? { secureCookies } : {}),
+  }
+}
+
+/**
+ * Build the reference-shaped config `apply` receives, exactly as the Loader
+ * builds it. Exported for tests that drive `apply` directly.
+ * @param raw - a config object; missing fields take their schema defaults.
+ * @returns one reference per volatile field.
+ */
+export function configRefs(raw: object): ConfigRefs {
+  return Config(raw) as unknown as ConfigRefs
+}
+
+/**
+ * Validate a raw config object the way the Loader does, and unwrap it.
+ *
+ * `Config` marks every field volatile, so a validation hands the values back as
+ * references (typed deeply-readonly by schemastery); this returns the plain
+ * shape the rest of the file reads. Used to judge a config the Settings card is
+ * about to save, before it is persisted.
+ * @param raw - a config object; missing fields take their schema defaults.
+ * @returns the validated plain config.
+ */
+export function validateConfig(raw: object): Config {
+  return readConfig(configRefs(raw))
+}
 
 /** Facts the fail-closed start guard needs to judge a config. */
 export interface StartFacts {
@@ -432,7 +513,7 @@ export function buildConfigPatch(submitted: Record<string, unknown>): {
   return { patch, clear, unknown }
 }
 
-export function apply(ctx: Context, config: Config): void {
+export function apply(ctx: Context, config: ConfigRefs): void {
   let state = loadState()
   let gateway: LanGateway | undefined
   let startedWith: string | undefined
@@ -455,18 +536,20 @@ export function apply(ctx: Context, config: Config): void {
   let connectionGeneration = 0
   /** Builds a fresh shared-session relay for a dsh port, once the base supports sessions. */
   let makeRelay: ((dshPort: number) => UpstreamSession) | undefined
-  /** The authoritative config: settings section when attached, else composition. */
-  let configSource: () => Config = () => config
-  /** Whether writes go to the settings section rather than staying in memory. */
+  /** Whether the settings service is attached, so writes reach the profile entry. */
   let settingsAttached = false
-  /** The settings scope for the `lan-gateway` namespace, while one is attached. */
-  let settingsScope: SettingsScope<Config> | undefined
   /**
-   * The settings provider, for the one write a scope cannot express: a section
-   * key must be *removed* to re-inherit the composition layer, and only the
-   * provider's path-addressed `mutate` can unset one.
+   * This plugin's own Loader entry id. dsh 0.1.7 addresses a settings write by
+   * the *entry id* — the `lan-gateway` namespace this plugin used to register
+   * with is gone along with `settingsScope`.
    */
-  let settingsProvider: SettingsProvider | undefined
+  let settingsEntryId: string | undefined
+  /**
+   * The settings service, for the one write a merge patch cannot express: a key
+   * must be *removed* to re-inherit the composition layer, and only its
+   * path-addressed `mutate` can unset one.
+   */
+  let settingsProvider: SettingsService | undefined
   /**
    * One queue for every lifecycle side effect. Settings changes, tool commands,
    * credential changes, TLS regeneration and plugin disposal all land here, so
@@ -476,7 +559,7 @@ export function apply(ctx: Context, config: Config): void {
   /** Set by the dispose hook; a start that completes after it must undo itself. */
   let disposed = false
 
-  const effective = (): Config => configSource()
+  const effective = (): Config => readConfig(config)
 
   /** Queue one lifecycle action behind every action already running. */
   const enqueue = (reason: string, action: () => Promise<void>): Promise<void> => {
@@ -557,8 +640,8 @@ export function apply(ctx: Context, config: Config): void {
     const cfg = effective()
     // Without a settings service there is nowhere to record the tool's intent,
     // so it lives in memory as an override on the composition entry. With one
-    // attached, `enabled` already carries it and an override would shadow the
-    // card — the defect this replaces.
+    // attached, the profile entry's `enabled` already carries it and an override
+    // would shadow the card — the defect this replaces.
     if (settingsAttached) return cfg
     return manualOverride === undefined ? cfg : { ...cfg, enabled: manualOverride }
   }
@@ -580,39 +663,41 @@ export function apply(ctx: Context, config: Config): void {
     })
   }
 
-  /** Record the run intent where it will survive: the settings section, or memory. */
+  /** Record the run intent where it will survive: the profile entry, or memory. */
   const setRunIntent = async (enabled: boolean): Promise<void> => {
-    if (settingsAttached && settingsScope !== undefined) {
-      // The same field the Settings card writes. A merge patch, so nothing else
-      // in the user's section is disturbed.
-      await settingsScope.update({ enabled })
-      // The section's watcher queues the reconcile; it observes committed
-      // changes, so waiting on it here would deadlock behind this same write.
+    if (settingsAttached && settingsProvider !== undefined && settingsEntryId !== undefined) {
+      // The same field the Settings card writes, in this plugin's own profile
+      // entry. A merge patch, so nothing else in the entry is disturbed.
+      await settingsProvider.update(settingsEntryId, { enabled })
+      // The write updates the config references in place and the loader then
+      // emits `loader/volatile-update`, which queues the reconcile; waiting on
+      // that here would deadlock behind this same write.
       return
     }
     manualOverride = enabled
   }
 
-  // The tunables also live in the `lan-gateway` settings section: while the
-  // settings service exists, the section (composition base + user overrides)
-  // is the authoritative config, and every committed change re-syncs the
-  // listener — so the Settings → Plugins page adjusts the gateway live.
-  // Registered directly (not via installSection) so the scope handle is
-  // available to the /lan-gateway/config route for writes.
+  // The tunables live in this plugin's own profile entry, and dsh 0.1.7 reaches
+  // it by *entry id*: the `lan-gateway` settings namespace this plugin used to
+  // register (and the scope handle it wrote through) no longer exist. The entry
+  // id is the Loader's, so it comes from the fiber; without a Loader there is no
+  // entry to write and the composition value stands alone.
   ctx.inject(['settings'], (sctx) => {
-    const scope = sctx.settings.register(NS, Config, { base: config })
-    settingsScope = scope
+    const entryId = ctx.fiber.entry?.options.id
+    if (entryId === undefined) return
+    settingsEntryId = entryId
     settingsProvider = sctx.settings
     settingsAttached = true
-    configSource = () => scope.get()
-    sctx.effect(() => scope.watch(() => { void syncGateway('settings change') }))
+    // This plugin ships its own card, so it owns its page policy.
+    sctx.effect(() => sctx.settings.configure({ auto: false }, ctx.fiber))
+    // A committed write updates the volatile references in place (no remount)
+    // and emits this, so the listener follows the new config.
+    sctx.effect(() => ctx.on('loader/volatile-update', () => { void syncGateway('settings change') }))
     sctx.effect(() => () => {
-      // The settings provider went away (disposal / provider reload): fall back
-      // to the composition entry so the plugin keeps working as composed, and
-      // reconcile so the listener follows the config that is now authoritative
-      // instead of staying on the section's last value.
-      configSource = () => config
-      settingsScope = undefined
+      // The settings service went away (disposal / provider reload): the
+      // composition entry is authoritative again, and the tool's intent falls
+      // back to memory. Reconcile so the listener follows it.
+      settingsEntryId = undefined
       settingsProvider = undefined
       settingsAttached = false
       void syncGateway('settings detach')
@@ -697,7 +782,12 @@ export function apply(ctx: Context, config: Config): void {
       send(400, { error: 'body must be a config object' })
       return
     }
-    if (settingsProvider === undefined) {
+    // A settings write is addressed by this plugin's profile entry id; without
+    // one (no Loader, or no settings service) the composition value is all there
+    // is, and the operator edits the profile patch instead.
+    const settings = settingsProvider
+    const entryId = settingsEntryId
+    if (settings === undefined || entryId === undefined) {
       send(409, { error: 'settings service unavailable — edit the profile patch (cordis.patch.yml) instead' })
       return
     }
@@ -708,7 +798,7 @@ export function apply(ctx: Context, config: Config): void {
     // Validate the candidate the patch would produce — schema defaults included,
     // exactly as the listener will resolve it — so the save fails closed on an
     // unusable combination instead of persisting it.
-    const candidate = Config({ ...effective(), ...patch })
+    const candidate = validateConfig({ ...effective(), ...patch })
     // A structural problem (legacy authRequired:false, lanPasswordless without
     // a session-capable base) is invalid however it is reached; a start
     // condition (plaintext without TLS/terminator/opt-in) only blocks a save
@@ -730,7 +820,7 @@ export function apply(ctx: Context, config: Config): void {
       // key so it re-inherits the composition layer. Storing null instead would
       // leave a null where the config expects a string, and `!== undefined`
       // tests elsewhere would then read that null as a declared value.
-      if (ops.length > 0) await settingsProvider.mutate(NS, ops)
+      if (ops.length > 0) await settings.mutate(entryId, ops)
       // The write commits through the section's watcher; reconcile explicitly so
       // the response reports a settled listener rather than a mid-restart one.
       await syncGateway('config route save')

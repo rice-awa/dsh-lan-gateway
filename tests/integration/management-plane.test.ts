@@ -1,9 +1,15 @@
 /**
  * Management-plane round-trip tests: a fake cordis context driving the real
- * `apply()`, the real `LanGateway`, and a real `SettingsProvider`, so the two
- * ways an operator changes the gateway — the `lan_gateway` tool and the
- * Settings card's config route — are exercised against one shared state rather
- * than against a summary of it.
+ * `apply()`, the real `LanGateway`, and a stand-in for the 0.1.7 settings
+ * service, so the two ways an operator changes the gateway — the `lan_gateway`
+ * tool and the Settings card's config route — are exercised against one shared
+ * state rather than against a summary of it.
+ *
+ * Since dsh 0.1.7 a settings write is addressed by the plugin's own **profile
+ * entry id** (there is no `lan-gateway` settings namespace any more), and the
+ * Loader reflects a committed write by updating the volatile config references
+ * in place. `MemorySettings` below reproduces both, so a route save really does
+ * change what the listener resolves.
  *
  * `process.env.HOME` is pointed at a temp dir before anything runs: `state.ts`
  * and `tls.ts` both resolve `~/.dsh/lan-gateway` through `os.homedir()`, which
@@ -17,28 +23,63 @@ import type { AddressInfo } from 'node:net'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Context } from '@deepseek-ai/cordis'
-import SettingsProvider from '@deepseek-ai/dsh-settings'
+import { updateVolatile } from '@deepseek-ai/cosmokit'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { apply, Config, type Config as GatewayConfig } from '../../src/index.ts'
+import {
+  apply,
+  configRefs,
+  validateConfig,
+  type Config as GatewayConfig,
+  type ConfigRefs,
+} from '../../src/index.ts'
 import { DEFAULT_LAN_CIDR_STRINGS } from '../../src/auth.ts'
 
 /** The dsh port the fake web server claims; nothing listens on it. */
 const DSH_PORT = 13080
 
-/** An in-memory SettingsProvider: one document, no disk. */
-class MemorySettings extends SettingsProvider {
-  doc: Record<string, unknown> = {}
+/** The profile entry id the fake Loader mounts this plugin under. */
+const ENTRY_ID = 'dsh-lan-gateway'
+
+/** One path-addressed settings edit, as the 0.1.7 service takes them. */
+type PathOp = { op: 'set'; path: readonly string[]; value: unknown } | { op: 'unset'; path: readonly string[] }
+
+/**
+ * An in-memory stand-in for the 0.1.7 settings service: one document keyed by
+ * profile entry id, no disk. It exposes the surface `SettingsForms` does — and
+ * deliberately not `register`, which 0.1.7 removed; a plugin that still calls it
+ * fails here the same way it fails in the harness.
+ */
+class MemorySettings {
+  doc: Record<string, Record<string, unknown>> = {}
   readonly writable = true
-  protected async load(): Promise<Record<string, unknown>> {
-    return this.doc
+
+  constructor(private readonly onWrite: (entryId: string) => void) {}
+
+  /** Page policy for a plugin that ships its own card; nothing to record. */
+  configure(): () => void {
+    return () => {}
   }
-  protected async persist(ns: string, section: Record<string, unknown>): Promise<void> {
-    this.doc = { ...this.doc, [ns]: section }
+
+  async update(entryId: string, patch: Record<string, unknown>): Promise<void> {
+    this.doc[entryId] = { ...this.doc[entryId], ...patch }
+    this.onWrite(entryId)
   }
-  /** The stored user section for a namespace, as the route would have left it. */
-  storedSection(ns: string): Record<string, unknown> {
-    return (this.doc[ns] ?? {}) as Record<string, unknown>
+
+  async mutate(entryId: string, ops: readonly PathOp[]): Promise<void> {
+    const section = { ...this.doc[entryId] }
+    for (const op of ops) {
+      const key = op.path[0]
+      if (key === undefined) continue
+      if (op.op === 'set') section[key] = op.value
+      else delete section[key]
+    }
+    this.doc[entryId] = section
+    this.onWrite(entryId)
+  }
+
+  /** The stored user section for an entry, as a write would have left it. */
+  storedSection(entryId: string): Record<string, unknown> {
+    return this.doc[entryId] ?? {}
   }
 }
 
@@ -47,7 +88,7 @@ class MemorySettings extends SettingsProvider {
  * validated, so every default is filled in and then overridden per test.
  */
 function baseConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
-  return Config({
+  return validateConfig({
     enabled: false,
     // Never bound by the tests that leave the listener stopped; the ones that
     // start it pass an explicit free port. Port 0 is not an option: the schema
@@ -65,7 +106,7 @@ function baseConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
     tlsCertMaxAgeDays: 825,
     allowInsecurePlaintext: true,
     ...overrides,
-  }) as GatewayConfig
+  })
 }
 
 /** The slice of `Context` `apply()` actually touches, with the seams captured. */
@@ -97,7 +138,28 @@ function harness(
   const logs: string[] = []
   const teardown: Array<() => Promise<void> | void> = []
   let registered: ToolDefinition | undefined
-  const provider = new MemorySettings(new Context())
+  /**
+   * The live config references `apply` is handed, exactly as the Loader builds
+   * them: one reference per volatile field.
+   */
+  const refs: ConfigRefs = configRefs({ ...config })
+  /** Listeners for `loader/volatile-update`, which the plugin re-syncs on. */
+  const volatileListeners = new Set<() => void>()
+
+  /**
+   * Reflect a committed entry write into the live references, the way the
+   * Loader does: re-resolve the entry, copy each value into its reference in
+   * place, then announce it. Without this the plugin would keep serving the
+   * pre-write config and every round-trip assertion below would be vacuous.
+   */
+  const provider = new MemorySettings((entryId) => {
+    const resolved = configRefs({ ...config, ...provider.storedSection(entryId) })
+    for (const [key, ref] of Object.entries(refs)) {
+      const source = (resolved as Record<string, { get(): unknown } | undefined>)[key]
+      if (ref !== undefined && source !== undefined) updateVolatile(ref, source)
+    }
+    for (const listener of volatileListeners) listener()
+  })
 
   const effect = (body: () => unknown): (() => void) => {
     const result = body()
@@ -130,6 +192,14 @@ function harness(
       },
     },
     effect,
+    // The plugin reads its own profile entry id from the fiber: that id, not a
+    // `lan-gateway` namespace, is what a settings write is addressed by.
+    fiber: { entry: { options: { id: ENTRY_ID } } },
+    on(event: string, listener: () => void) {
+      if (event !== 'loader/volatile-update') return () => {}
+      volatileListeners.add(listener)
+      return () => { volatileListeners.delete(listener) }
+    },
     inject(names: string[], callback: (child: unknown) => void) {
       const child: Record<string, unknown> = { logger: ctx.logger, effect }
       if (options.settings === true) child['settings'] = provider
@@ -143,7 +213,7 @@ function harness(
     },
   }
 
-  apply(ctx as never, config)
+  apply(ctx as never, refs)
 
   const handler = (): RouteHandler => {
     const found = routes.get('/lan-gateway/config')
@@ -252,19 +322,19 @@ describe('the Settings card save path', () => {
     const response = await h.post({ gatewayPort: 3099, evil: 'payload' })
 
     expect(response.status).toBe(200)
-    expect(h.provider.storedSection('lan-gateway')).toEqual({ gatewayPort: 3099 })
+    expect(h.provider.storedSection(ENTRY_ID)).toEqual({ gatewayPort: 3099 })
     // The unknown key was reported rather than silently stored.
     expect(response.body['ignored']).toEqual(['evil'])
     // No schema default was written into the user section, and the one real
     // edit did land.
     expect(await currentConfig(h)).toMatchObject({ cookieName: 'custom_cookie', gatewayPort: 3099 })
-    expect(h.provider.storedSection('lan-gateway')['authRequired']).toBeUndefined()
+    expect(h.provider.storedSection(ENTRY_ID)['authRequired']).toBeUndefined()
   })
 
   it('never writes the refused legacy capability into the user section', async () => {
     const h = start(baseConfig(), { settings: true })
     await h.post({ gatewayPort: 3099 })
-    expect(h.provider.storedSection('lan-gateway')['authRequired']).toBeUndefined()
+    expect(h.provider.storedSection(ENTRY_ID)['authRequired']).toBeUndefined()
   })
 
   it('clears a key on null so it re-inherits the composition layer', async () => {
@@ -273,14 +343,14 @@ describe('the Settings card save path', () => {
 
     // Removed from the section, not stored as null — a stored null would read
     // as "a terminator is declared" to every `!== undefined` test.
-    expect(h.provider.storedSection('lan-gateway')).toEqual({})
+    expect(h.provider.storedSection(ENTRY_ID)).toEqual({})
     expect(await currentConfig(h)).toMatchObject({ trustedTerminator: 'nginx' })
   })
 
   it('clears an optional field emptied in the form', async () => {
     const h = start(baseConfig({ tlsCertPath: '/etc/ssl/cert.pem' }), { settings: true })
     await h.post({ tlsCertPath: '' })
-    expect(h.provider.storedSection('lan-gateway')).toEqual({})
+    expect(h.provider.storedSection(ENTRY_ID)).toEqual({})
     expect(await currentConfig(h)).toMatchObject({ tlsCertPath: '/etc/ssl/cert.pem' })
   })
 
@@ -289,7 +359,7 @@ describe('the Settings card save path', () => {
     const response = await h.post({ enabled: true })
     expect(response.status).toBe(409)
     expect(String(response.body['error'])).toContain('plaintext')
-    expect(h.provider.storedSection('lan-gateway')).toEqual({})
+    expect(h.provider.storedSection(ENTRY_ID)).toEqual({})
   })
 
   it('allows tuning a dormant config that would not be allowed to start', async () => {
@@ -298,7 +368,7 @@ describe('the Settings card save path', () => {
     const h = start(baseConfig({ allowInsecurePlaintext: false }), { settings: true })
     const response = await h.post({ gatewayPort: 3099, enabled: false })
     expect(response.status).toBe(200)
-    expect(h.provider.storedSection('lan-gateway')).toEqual({ enabled: false, gatewayPort: 3099 })
+    expect(h.provider.storedSection(ENTRY_ID)).toEqual({ enabled: false, gatewayPort: 3099 })
   })
 
   it('refuses a cross-site save from a non-loopback Host', async () => {
@@ -357,7 +427,7 @@ describe('the tool and the card share one run intent', () => {
     await h.run({ command: 'set-password', password: PASSWORD })
     await h.run({ command: 'enable' })
 
-    expect(h.provider.storedSection('lan-gateway')).toMatchObject({ enabled: true })
+    expect(h.provider.storedSection(ENTRY_ID)).toMatchObject({ enabled: true })
   })
 
   it('leaves the run intent in memory when no settings service exists', async () => {

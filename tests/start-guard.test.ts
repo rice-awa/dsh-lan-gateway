@@ -11,7 +11,7 @@
 import type { IncomingMessage } from 'node:http'
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_LAN_CIDR_STRINGS } from '../src/auth.ts'
-import { Config, gatewayStartProblems, isTrustedConfigRequest, resolveSecureCookies, type Config as GatewayConfig } from '../src/index.ts'
+import { gatewayStartProblems, isTrustedConfigRequest, resolveSecureCookies, validateConfig, type Config as GatewayConfig } from '../src/index.ts'
 
 /** A fully-defaulted Config so a test only overrides what it is judging. */
 function baseConfig(over: Partial<GatewayConfig> = {}): GatewayConfig {
@@ -139,13 +139,13 @@ describe('resolveSecureCookies (session-cookie Secure attribute)', () => {
   it('an explicit false survives schemastery round-trip rather than collapsing to auto', () => {
     // The settings card posts null to clear; a real false must not be coerced,
     // or the plaintext-proxy escape hatch would silently re-enable Secure.
-    const parsed = Config(baseConfig({ trustedTerminator: 'nginx', secureCookies: false }))
+    const parsed = validateConfig(baseConfig({ trustedTerminator: 'nginx', secureCookies: false }))
     expect(parsed.secureCookies).toBe(false)
     expect(resolveSecureCookies(parsed)).toBe(false)
   })
 
   it('a cleared (null) secureCookies falls back to automatic', () => {
-    const parsed = Config({ ...baseConfig({ trustedTerminator: 'nginx' }), secureCookies: null } as unknown as GatewayConfig)
+    const parsed = validateConfig({ ...baseConfig({ trustedTerminator: 'nginx' }), secureCookies: null })
     expect(resolveSecureCookies(parsed)).toBe(true)
   })
 })
