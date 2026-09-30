@@ -6,7 +6,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/DeepSeek%20Harness-4d6bfe?logo=deepseek&logoColor=fff&style=flat-square" alt="DeepSeek Harness" />
-  <img src="https://img.shields.io/badge/version-0.6.1-2b7fff?style=flat-square" alt="version 0.6.1" />
+  <img src="https://img.shields.io/badge/version-0.6.2-2b7fff?style=flat-square" alt="version 0.6.2" />
   <img src="https://img.shields.io/badge/TLS-8b5cf6?logo=lock&logoColor=fff&style=flat-square" alt="TLS" />
   <img src="https://img.shields.io/github/license/rice-awa/dsh-lan-gateway?style=flat-square" alt="MIT license" />
   <a href="https://awesome-dsh-plugin.com"><img src="https://awesome-dsh-plugin.com/badge.svg" alt="awesome · DSH plugin" /></a>
@@ -44,7 +44,7 @@ cd dsh-lan-gateway
 pnpm install
 pnpm build          # host → lib/index.js
 pnpm build:client   # client → lib/client.js
-pnpm test           # 204 项
+pnpm test           # 206 项
 ```
 
 仓库里还有一个 [lan-gateway](skills/lan-gateway.md) 技能，安装后可直接在 dsh 对话里说「设置网关密码为 …」「开启远程访问」，agent 会调用 `lan_gateway` 工具完成，密码以参数传入，不写入配置，也不回显。改密码也可以不走模型：在本机打开 **Plugins** 页的「LAN 网关」卡片，直接填两次新密码覆盖（见下「登录密码」）。安装方式见 [INSTALL.md](INSTALL.md#for-agents完整安装流程)。
@@ -204,7 +204,7 @@ client bundle 在模块级给 `Crypto` 原型补一个基于 `crypto.getRandomVa
 ## 开发
 
 ```bash
-pnpm test        # 204 项
+pnpm test        # 206 项
 pnpm typecheck   # tsc 双端（host + client）
 ```
 
@@ -219,8 +219,9 @@ pnpm typecheck   # tsc 双端（host + client）
 ✓ tests/x509.test.ts                           ( 6) 自签名证书 DER/SAN/签名/TLS 握手
 ✓ tests/tls.test.ts                            ( 9) 证书持久化 / 到期换发 / 重生成 / 自定义证书加载
 ✓ tests/uuid-shim.test.ts                      ( 3) 不安全源补丁 / 安全源 no-op / v4 正确性
-✓ tests/settings-card.test.ts                  (15) 设置页字段编解码（三态 auto ↔ false 不可混淆）/
-                                                    卡片注册槽与条目 id 契约 / 密码草稿闸门（长度与确认）
+✓ tests/settings-card.test.ts                  (17) 设置页字段编解码（三态 auto ↔ false 不可混淆）/
+                                                    卡片注册槽与条目 id 契约 / 密码草稿闸门（长度与确认）/
+                                                    密码状态徽标三态（缺字段 = 未知，不是「未设置」）
 ✓ tests/integration/gateway.test.ts            (26) 真实网关端到端：全来源登录 / LAN 豁免 / 跨站 403 / 升级拒绝 /
                                                     cookie 属性 / epoch 撤销 / 逐会话登出 / 尾斜杠 / IPv6 / 会话中继
 ✓ tests/integration/management-plane.test.ts   (24) 真实 apply()：工具与卡片交替启停 / 未编辑字段与未知键保留 /

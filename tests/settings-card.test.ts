@@ -24,6 +24,7 @@ import {
   formatValue,
   parseValue,
   passwordProblem,
+  passwordStatus,
   type FieldDef,
 } from '../src/client/lan-gateway-card.tsx'
 import { MIN_PASSWORD_LENGTH } from '../src/config-fields.ts'
@@ -95,6 +96,21 @@ describe('settings-card password draft gate', () => {
 
   it('accepts a confirmed draft of at least the minimum length', () => {
     expect(passwordProblem('correct-horse', 'correct-horse')).toBeNull()
+  })
+})
+
+describe('settings-card password badge', () => {
+  it('treats an absent flag as unknown, never as "not set"', () => {
+    // A host from before the password route reports no `passwordSet` at all. A
+    // card that reads that as "not set" announces that a gateway which is
+    // demonstrably running (it cannot start without a credential) has none —
+    // observed live: the new card against a running 0.6.0 host.
+    expect(passwordStatus(undefined)).toBe('unknown')
+  })
+
+  it('reads the two reported states', () => {
+    expect(passwordStatus(true)).toBe('set')
+    expect(passwordStatus(false)).toBe('unset')
   })
 })
 

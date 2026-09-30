@@ -61,6 +61,27 @@ interface RouteState {
 export type PasswordProblem = 'tooShort' | 'mismatch'
 
 /**
+ * The card's password badge state.
+ *
+ * Three states, not two: a host that predates the password route does not
+ * report `passwordSet` at all, and `undefined` must read as "unknown" rather
+ * than "not set" — a client refreshed against a running old host would
+ * otherwise announce that a gateway which is demonstrably running (it cannot
+ * start without a credential) has no password.
+ */
+export type PasswordStatus = 'set' | 'unset' | 'unknown'
+
+/**
+ * Classify the host's `passwordSet` for the badge.
+ * @param passwordSet - the snapshot's flag, or `undefined` when absent.
+ * @returns `set` / `unset` / `unknown` (absent field).
+ */
+export function passwordStatus(passwordSet: boolean | undefined): PasswordStatus {
+  if (passwordSet === undefined) return 'unknown'
+  return passwordSet ? 'set' : 'unset'
+}
+
+/**
  * Judge a password draft the way the host's password route will, so a draft the
  * card enables is never answered with a 400. The length bound is the shared
  * {@link MIN_PASSWORD_LENGTH}; the confirmation is a UI concern and is checked
@@ -102,7 +123,9 @@ interface Labels {
   passwordConfirm: string
   passwordSet: string
   passwordUnset: string
+  passwordUnknown: string
   passwordRequired: string
+  passwordHostStale: string
   passwordChange: string
   passwordChanged: string
   passwordFailed: string
@@ -137,7 +160,9 @@ const LABELS: Record<'zh' | 'en', Labels> = {
     passwordConfirm: '再次输入新密码',
     passwordSet: '已设置',
     passwordUnset: '未设置',
+    passwordUnknown: '状态未知（宿主端较旧）',
     passwordRequired: '未设置密码时网关拒绝启动。',
+    passwordHostStale: '宿主端没有报告密码状态，说明 dsh web 还在运行旧版本：重启后这里才会显示「已设置 / 未设置」，这个改密表单也才会生效。',
     passwordChange: '修改密码',
     passwordChanged: '密码已更新：旧密码立即失效，所有已登录会话已作废。',
     passwordFailed: '修改密码失败，请重试。',
@@ -200,7 +225,9 @@ const LABELS: Record<'zh' | 'en', Labels> = {
     passwordConfirm: 'Repeat new password',
     passwordSet: 'Set',
     passwordUnset: 'Not set',
+    passwordUnknown: 'Unknown (older host)',
     passwordRequired: 'The gateway refuses to start without a password.',
+    passwordHostStale: 'The host did not report a password state, so dsh web is still running the previous build: restart it to get Set / Not set here and to make this form take effect.',
     passwordChange: 'Change password',
     passwordChanged: 'Password updated: the old one no longer works and every signed-in session was revoked.',
     passwordFailed: 'The password change failed — retry.',
@@ -361,6 +388,7 @@ export function LanGatewayCard(props: LanGatewayCardProps): ReactNode {
   const dirty = Object.keys(drafts).length > 0
   const passwordDraftProblem = passwordProblem(password, passwordConfirm)
   const passwordTyping = password !== '' || passwordConfirm !== ''
+  const passwordBadge = passwordStatus(route.passwordSet)
 
   /** Adopt the host's post-write snapshot, keeping the last known values. */
   const adopt = (body: Partial<RouteState>): void => {
@@ -371,7 +399,10 @@ export function LanGatewayCard(props: LanGatewayCardProps): ReactNode {
       port: body.port ?? 0,
       tls: body.tls ?? '',
       lastError: body.lastError ?? null,
-      passwordSet: body.passwordSet === true,
+      // Absent is a state of its own (an older host does not report the field),
+      // so it must not be coerced into `false`: that is what made a running,
+      // password-protected gateway render as "not set".
+      ...(body.passwordSet !== undefined ? { passwordSet: body.passwordSet } : {}),
     })
   }
 
@@ -562,12 +593,15 @@ export function LanGatewayCard(props: LanGatewayCardProps): ReactNode {
             <div style={styles.section}>
               <div style={styles.sectionHead}>
                 <span style={styles.label}>{t.passwordSection}</span>
-                <span style={route.passwordSet === true ? styles.badge : styles.badgeAlert}>
-                  {route.passwordSet === true ? t.passwordSet : t.passwordUnset}
+                <span style={passwordBadge === 'unset' ? styles.badgeAlert : styles.badge}>
+                  {passwordBadge === 'set'
+                    ? t.passwordSet
+                    : passwordBadge === 'unset' ? t.passwordUnset : t.passwordUnknown}
                 </span>
               </div>
               <p style={styles.hint}>{t.passwordHint}</p>
-              {route.passwordSet === true ? null : <p style={styles.error}>{t.passwordRequired}</p>}
+              {passwordBadge === 'unset' ? <p style={styles.error}>{t.passwordRequired}</p> : null}
+              {passwordBadge === 'unknown' ? <p style={styles.hint}>{t.passwordHostStale}</p> : null}
               <div style={styles.passwordRow}>
                 <input
                   id="lan-gw-password"

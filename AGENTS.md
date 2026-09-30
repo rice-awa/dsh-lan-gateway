@@ -14,7 +14,7 @@ pnpm is the package manager (`packageManager` field, pnpm@11.20.0). Node 22 in C
 pnpm install
 pnpm build        # tsdown: builds BOTH bundles (host lib/index.js + client lib/client.js)
 pnpm typecheck    # two tsconfigs, both must pass
-pnpm test         # vitest run, 204 tests
+pnpm test         # vitest run, 206 tests
 npx vitest run tests/gateway.test.ts   # one file
 npx vitest run -t "rate limit"         # one test by name
 ```
@@ -81,7 +81,7 @@ Touches, at minimum: the `Config` interface, the `z.object` schema and the `read
 - `tests/integration/gateway.test.ts` — real sockets against an in-process fake upstream. Source class is posed through the injectable `classifySource` on `GatewayConfig` rather than by binding other addresses.
 - `tests/upstream-session.test.ts` — real loopback token exchange against an in-process minter.
 - `tests/request-policy.test.ts` — the decision seam, against literal `RequestHead` objects: path normalization, owned prefix, same-site and login fences, and both directions of the header transforms.
-- `tests/settings-card.test.ts` — the card's tri-state field codec, the password draft gate (`passwordProblem`: the shared length bound first, then the confirmation), plus the slot-registration contract: the card registers into `plugins.item` under `dsh-lan-gateway`, carries a label thunk, and withdraws once the Host stops serving the entry.
+- `tests/settings-card.test.ts` — the card's tri-state field codec, the password draft gate (`passwordProblem`: the shared length bound first, then the confirmation), the password badge's three states (`passwordStatus`: an absent `passwordSet` is `unknown`, never `unset` — a refreshed client against a running old host must not announce that a password-protected gateway has none), plus the slot-registration contract: the card registers into `plugins.item` under `dsh-lan-gateway`, carries a label thunk, and withdraws once the Host stops serving the entry.
 - `tests/integration/management-plane.test.ts` — a fake cordis context running the real `apply()` with a stand-in for the 0.1.7 settings service, so the `lan_gateway` tool and the card's config **and password** routes are exercised against one shared state. The password tests read the real `state.json` in the redirected home (`loadState` + `verifyPassword`), so "the old password stopped working", "the epoch advanced", and "no hash, salt, or plaintext came back over the wire" are asserted against the credential itself rather than the route's own summary. The fake exposes the 0.1.7 surface and deliberately *not* `register`, and it reflects a write into the volatile config references the way the Loader does — so a plugin that still calls the removed API fails here. `HOME` *and* `USERPROFILE` are redirected to a temp dir, because Windows answers `os.homedir()` from the latter; `state.ts` and `tls.ts` both resolve `homedir()` at call time, so the plugin's real files are never touched.
 - `tests/integration/session-races.test.ts` — the races the audit named: a credential change landing mid-sign-in (D9) or mid-handshake (D10), and an upstream that answers a WebSocket upgrade with a non-101 (D12). `verifyPassword` is partially mocked to a hand-settled promise, because scrypt resolves too fast for the window to be observable otherwise.
 - `tsconfig.json` excludes `src/client` and the two client tests; `tsconfig.client.json` (dom + `jsx: react-jsx`) includes exactly those. `pnpm typecheck` runs both, so a client-only change still needs the second config.
