@@ -6,7 +6,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/DeepSeek%20Harness-4d6bfe?logo=deepseek&logoColor=fff&style=flat-square" alt="DeepSeek Harness" />
-  <img src="https://img.shields.io/badge/version-0.5.5-2b7fff?style=flat-square" alt="version 0.5.5" />
+  <img src="https://img.shields.io/badge/version-0.6.0-2b7fff?style=flat-square" alt="version 0.6.0" />
   <img src="https://img.shields.io/badge/TLS-8b5cf6?logo=lock&logoColor=fff&style=flat-square" alt="TLS" />
   <img src="https://img.shields.io/github/license/rice-awa/dsh-lan-gateway?style=flat-square" alt="MIT license" />
   <a href="https://awesome-dsh-plugin.com"><img src="https://awesome-dsh-plugin.com/badge.svg" alt="awesome · DSH plugin" /></a>
@@ -14,7 +14,7 @@
 
 `dsh web` 明确拒绝 `--host 0.0.0.0`，以免把远程代码执行暴露到网络。本插件的做法是让 dsh 继续只绑 `127.0.0.1`，另起一个反向代理监听未指定地址（双栈，IPv4 与 IPv6 客户端都可接入），转发到 loopback 端口并改写 `Host` / `Origin`。
 
-默认拒绝：loopback、LAN、公网三种来源都要先在网关登录页取得 HMAC 会话 cookie，LAN 免密需要显式打开 `lanPasswordless`，默认关闭。底座为 dsh ≥ 0.1.2-rc.1 时（含 QVD-2026-57410 的上游修复），网关在进程内中继一条共享上游会话，上游自身的授权仍然把关每个请求，网关只决定谁可以使用这条会话。
+默认拒绝：loopback、LAN、公网三种来源都要先在网关登录页取得 HMAC 会话 cookie，LAN 免密需要显式打开 `lanPasswordless`，默认关闭。底座要求 dsh ≥ 0.1.7（本插件按该版本的 settings API 写入配置；含 QVD-2026-57410 的上游修复），网关在进程内中继一条共享上游会话，上游自身的授权仍然把关每个请求，网关只决定谁可以使用这条会话。
 
 插件另外提供两项功能：
 
@@ -70,7 +70,7 @@ lan_gateway disable           # 关闭
 
 ## 配置
 
-所有可调项都写在本插件自己的 profile 条目里（dsh ≥ 0.1.7 起，设置写入按**条目 id** 寻址；此前的 `lan-gateway` 用户设置命名空间已随 `settingsScope` 一起移除）。打开 **DSH 的 Settings → Plugins → 可配置插件**，展开「LAN 网关」卡片即可修改，保存即生效，监听器会按新配置自动重启。下表既是卡片字段，也是配置键：
+所有可调项都写在本插件自己的 profile 条目里（dsh ≥ 0.1.7 起，设置写入按**条目 id** 寻址；此前的 `lan-gateway` 用户设置命名空间已随 `settingsScope` 一起移除）。打开侧边栏的 **Plugins** 页，在官方插件列表里点开「LAN 网关」卡片即可修改，保存即生效，监听器会按新配置自动重启。卡片挂在 Plugins 页的 `plugins.item` 槽上，且只在底座确实 served 本插件条目时注册——没有 Loader 条目（写入必然 409）时卡片不会出现。下表既是卡片字段，也是配置键：
 
 | 键 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -169,8 +169,8 @@ lan_gateway disable           # 关闭
 ## 安全模型
 
 - **来源分级只认 `socket.remoteAddress`**（IPv4-mapped IPv6 会先解包），分 loopback / lan / internet 三档，绝不信任 `X-Forwarded-For`。分级本身不授予任何访问，每一档默认都要出示有效网关会话，否则 302 到 `/__login`。
-- **LAN 免密是显式 opt-in**。`lanPasswordless: true` 只让命中 `lanCidrs` 或 loopback 的来源跳过网关自己的登录页；底座 ≥ 0.1.2-rc.1 时上游会话仍把关每个请求。底座没有浏览器会话认证时这个开关拒绝启用，否则等同于把 QVD-2026-57410 原样恢复。
-- **共享上游会话中继**（dsh ≥ 0.1.2-rc.1）。dsh 不再信任回环 Host，要求出示 HMAC 签名的 `dsh-auth-*` cookie。插件经 `connection` 服务拿到启动令牌，在回环传输上做一次浏览器等价的令牌换取，取得 cookie 后中继到每个转发请求；上游一旦 401 就丢弃这条会话并重新换取。这仍是「单密码 = 单操作者」：通过网关登录的用户共用同一条上游会话，持钥的上游才是真正的授权主体。
+- **LAN 免密是显式 opt-in**。`lanPasswordless: true` 只让命中 `lanCidrs` 或 loopback 的来源跳过网关自己的登录页；受支持的底座（dsh ≥ 0.1.7）上游会话仍把关每个请求。底座没有浏览器会话认证时这个开关拒绝启用，否则等同于把 QVD-2026-57410 原样恢复。
+- **共享上游会话中继**（dsh ≥ 0.1.7）。dsh 不再信任回环 Host，要求出示 HMAC 签名的 `dsh-auth-*` cookie。插件经 `connection` 服务拿到启动令牌，在回环传输上做一次浏览器等价的令牌换取，取得 cookie 后中继到每个转发请求；上游一旦 401 就丢弃这条会话并重新换取。这仍是「单密码 = 单操作者」：通过网关登录的用户共用同一条上游会话，持钥的上游才是真正的授权主体。
 - **登录页**。`/__login` 由网关独占、不转发。密码以 scrypt 校验，每写一次重新加盐；登录尝试按来源限流（5 次 / 分钟）。
 - **会话 cookie** 是 `payload.signature` 结构（HMAC-SHA256），带撤销 epoch 与逐会话 id，`HttpOnly; SameSite=Strict`。登出撤销的是当前这条会话：它建立的 WebSocket 一并断开，其他设备不受影响。改密、清密、`rotate-secret` 递增 epoch，作废全部已签发 cookie 并断开全部已建立的 WebSocket，客户端需要重新登录。清空密码会直接停止监听。
 - **管理面不外泄**。`/lan-gateway/*`（含配置路由）由网关独占、一律 403 不转发，远程访问者无法借网关改写 Host 触及本机 loopback 的配置接口。原生 `/lan-gateway/config` 只应答回环 Host 且同源的请求。远程管理走 `lan_gateway` 工具。
@@ -199,17 +199,23 @@ pnpm typecheck   # tsc 双端（host + client）
 ```
 
 ```
-✓ tests/gateway.test.ts               (40) 分类 / HMAC cookie / epoch / 逐会话撤销 / 密码状态 / 限流
-✓ tests/start-guard.test.ts           (19) fail-closed 启动守卫 / 配置路由回环围栏 /
-                                           Secure cookie 属性推断（含 null 清除路径）
-✓ tests/integration/gateway.test.ts   (26) 真实网关端到端：全来源登录 / LAN 豁免 / 跨站 403 / 升级拒绝 /
-                                           cookie 属性 / epoch 撤销 / 逐会话登出 / 尾斜杠 / IPv6 / 会话中继
-✓ tests/uuid-shim.test.ts             ( 3) 不安全源补丁 / 安全源 no-op / v4 正确性
-✓ tests/x509.test.ts                  ( 6) 自签名证书 DER/SAN/签名/TLS 握手
-✓ tests/tls.test.ts                   ( 9) 证书持久化 / 到期换发 / 重生成 / 自定义证书加载
-✓ tests/upstream-session.test.ts      ( 8) 真实回环令牌换取：cookie 名匹配 / 拒绝后重换 /
-                                           invalidate 重获取 / 日志播报 / 保住已持有会话
-✓ tests/settings-card.test.ts         ( 6) 设置页字段编解码：三态 auto ↔ false 不可混淆
+✓ tests/gateway.test.ts                        (40) 分类 / HMAC cookie / epoch / 逐会话撤销 / 密码状态 / 限流
+✓ tests/start-guard.test.ts                    (19) fail-closed 启动守卫 / 配置路由回环围栏 /
+                                                    Secure cookie 属性推断（含 null 清除路径）
+✓ tests/request-policy.test.ts                 (46) 判定缝纯函数：路径归一化 / 归属前缀 / 同站与登录围栏 /
+                                                    两个方向的头部变换
+✓ tests/upstream-session.test.ts               ( 8) 真实回环令牌换取：cookie 名匹配 / 拒绝后重换 /
+                                                    invalidate 重获取 / 日志播报 / 保住已持有会话
+✓ tests/x509.test.ts                           ( 6) 自签名证书 DER/SAN/签名/TLS 握手
+✓ tests/tls.test.ts                            ( 9) 证书持久化 / 到期换发 / 重生成 / 自定义证书加载
+✓ tests/uuid-shim.test.ts                      ( 3) 不安全源补丁 / 安全源 no-op / v4 正确性
+✓ tests/settings-card.test.ts                  (10) 设置页字段编解码（三态 auto ↔ false 不可混淆）/
+                                                    卡片注册槽与条目 id 契约
+✓ tests/integration/gateway.test.ts            (26) 真实网关端到端：全来源登录 / LAN 豁免 / 跨站 403 / 升级拒绝 /
+                                                    cookie 属性 / epoch 撤销 / 逐会话登出 / 尾斜杠 / IPv6 / 会话中继
+✓ tests/integration/management-plane.test.ts   (15) 真实 apply()：工具与卡片交替启停 / 未编辑字段与未知键保留 /
+                                                    清空后继承 / 拒绝不可启动配置
+✓ tests/integration/session-races.test.ts      ( 8) 改密落在登录与握手途中的竞态 / 上游非 101 应答
 ```
 
 ### 发布
@@ -233,8 +239,8 @@ pnpm typecheck   # tsc 双端（host + client）
 pnpm install --frozen-lockfile
 pnpm typecheck && pnpm test
 npm publish --access public                       # prepack 自动构建 lib/
-git tag -a v0.5.5 -m "…" && git push origin v0.5.5
-gh release create v0.5.5 --generate-notes ./*.tgz # 可选：Release + tgz 附件
+git tag -a v0.6.0 -m "…" && git push origin v0.6.0
+gh release create v0.6.0 --generate-notes ./*.tgz # 可选：Release + tgz 附件
 ```
 
 ## 安全评估

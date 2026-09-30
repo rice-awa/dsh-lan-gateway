@@ -1,17 +1,23 @@
 /**
- * The lan-gateway settings card shown in the official DSH Settings → Plugins
- * page (the `settings.plugin.item` slot).
+ * The lan-gateway settings card, rendered by the official DSH Plugins page
+ * through its `plugins.item` slot.
  *
  * ModLens-style: the card carries NO injected services. It reads and writes
  * the loopback-only `/lan-gateway/config` host route (the browser never sees
- * the settings seam or any secret), so the client bundle's only dependency is
- * the `slots` service that every plugin already has.
+ * the settings seam or any secret), so the only platform service it needs is
+ * the `slots` service every plugin already has.
  *
  * @module @riceawa/dsh-lan-gateway/client/card
  */
 
 import { useEffect, useState, type ChangeEvent, type ReactNode } from 'react'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+// Type-only. The Plugins page owns the `plugins.item` contract, and its own
+// doc says a registrant merges that contract with `import type` instead of
+// importing the package at runtime. Taking the contract from its owner is also
+// what turns the next upstream rename of this slot into a compile error here,
+// rather than a card that quietly stops rendering.
+import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
 import {
   FIELDS,
   TRISTATE_OPTIONS,
@@ -22,23 +28,12 @@ import {
 } from '../config-fields.ts'
 
 /**
- * The official Settings → Plugins page declares the `settings.plugin.item`
- * slot keyed by the settings namespace each card edits (newer DSH releases;
- * older releases dispatched it as a list slot by `id`). The published package
- * ships no `src/`, so the entry is re-declared here — the runtime slot is
- * real; this only restores the compile-time table.
+ * Props the renderer binds for this card. The Plugins page asks for either the
+ * card's one-liner (`summary`) or the body of its own page (`page`), and draws
+ * the page's title, icon, and crumb itself. The card needs no injected face —
+ * it fetches its own route.
  */
-declare module '@deepseek-ai/dsh-client-ui-slots' {
-  interface SlotMap {
-    /** One plugin's card inside the plugin configuration section. */
-    'settings.plugin.item': { kind: 'keyed'; scope: 'root'; owner: { children?: never } }
-  }
-}
-
-/**
- * Props the renderer binds for this card (unused — the card is self-loading).
- */
-export type LanGatewayCardProps = PropsRuntime<'settings.plugin.item'>
+export type LanGatewayCardProps = PropsRuntime<'plugins.item'>
 
 /**
  * The card's field table and value codecs live in `config-fields.ts`, shared
@@ -192,6 +187,15 @@ function labels(): Labels {
   return lang.startsWith('zh') ? LABELS.zh : LABELS.en
 }
 
+/**
+ * The card's title in the browser's language, for the Plugins page's list
+ * entry. A thunk so the label follows the page's locale without re-registering.
+ * @returns the localized card title.
+ */
+export function cardTitle(): string {
+  return labels().title
+}
+
 /* ------------------------------------------------------------------ */
 /* Card                                                                */
 /* ------------------------------------------------------------------ */
@@ -199,10 +203,14 @@ function labels(): Labels {
 /**
  * Render the LAN gateway card. Self-loading: fetches the config route on
  * mount, posts the edited config on save.
- * @param _props - unused; the card needs no injected face.
- * @returns the card, or nothing while the route is unreachable.
+ *
+ * `view` swaps between the card's one-liner and its page body, so the branch
+ * sits after the hooks: the Plugins page re-renders one contribution under the
+ * other view when the card is opened.
+ * @param props - the view the Plugins page is asking for.
+ * @returns the one-liner, the card, or nothing while the route is unreachable.
  */
-export function LanGatewayCard(_props: LanGatewayCardProps): ReactNode {
+export function LanGatewayCard(props: LanGatewayCardProps): ReactNode {
   const t = labels()
   const [open, setOpen] = useState(false)
   const [route, setRoute] = useState<RouteState | null>(null)
@@ -225,6 +233,12 @@ export function LanGatewayCard(_props: LanGatewayCardProps): ReactNode {
     return () => { cancelled = true }
   }, [])
 
+  // The Plugins page lists this plugin as one card and opens its own page on
+  // demand: `summary` is the one-liner the list shows, `page` the body. The
+  // hooks above run for both views, because the same contribution flips
+  // between them.
+  if (props.view === 'summary') return t.description
+
   // A remote browser reaches this card through the gateway, which answers 403
   // for the plugin's own prefix by design, so the route is unreachable exactly
   // where a user is most likely to go looking for the setting. Rendering
@@ -232,7 +246,7 @@ export function LanGatewayCard(_props: LanGatewayCardProps): ReactNode {
   // a broken one; say what is wrong and where the card does work instead.
   if (loadFailed) {
     return (
-      <li style={styles.card}>
+      <div style={styles.card}>
         <div style={styles.header}>
           <span style={styles.headerTop}>
             <span style={styles.name}>{t.title}</span>
@@ -242,7 +256,7 @@ export function LanGatewayCard(_props: LanGatewayCardProps): ReactNode {
         <div style={styles.body}>
           <p style={styles.hint}>{t.readOnly}</p>
         </div>
-      </li>
+      </div>
     )
   }
   if (route === null) return null
@@ -407,7 +421,7 @@ export function LanGatewayCard(_props: LanGatewayCardProps): ReactNode {
   const statusLine = `${route.running ? t.running : t.stopped} · ${t.tls}: ${route.tls} · :${route.port}`
 
   return (
-    <li style={open ? { ...styles.card, ...styles.cardOpen } : styles.card}>
+    <div style={open ? { ...styles.card, ...styles.cardOpen } : styles.card}>
       <button
         type="button"
         style={styles.header}
@@ -449,7 +463,7 @@ export function LanGatewayCard(_props: LanGatewayCardProps): ReactNode {
           </div>
         )
         : null}
-    </li>
+    </div>
   )
 }
 

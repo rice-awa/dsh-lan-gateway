@@ -1,19 +1,30 @@
 /**
- * Settings-card field codec tests.
+ * Settings-card tests: the field codecs, and the slot the card registers into.
  *
- * The card posts the *whole* config on every save and the settings scope
- * applies it with a wholesale `replace`, so a field that the card cannot
- * express is not merely uneditable — the next save resets it to the
- * composition default. That makes the tri-state codec load-bearing: `auto`
- * (unset) and an explicit `false` must stay distinguishable, or the
- * plaintext-proxy escape hatch for `secureCookies` silently reverts and the
- * `/__login` loop comes back.
+ * The card's tri-state codec is load-bearing: it posts a patch of the edited
+ * fields only, so a field the card cannot express is left to the composition
+ * layer rather than reset to a schema default. `auto` (unset) and an explicit
+ * `false` must therefore stay distinguishable, or the plaintext-proxy escape
+ * hatch for `secureCookies` silently reverts and the `/__login` loop comes
+ * back.
+ *
+ * The registration tests below pin the other half of that contract: a card
+ * registered into a slot the Plugins page no longer renders disappears without
+ * a sound, which is how the 0.1.7 slot rename went unnoticed.
  *
  * @module tests/settings-card
  */
 
 import { describe, expect, it } from 'vitest'
-import { FIELDS, formatValue, parseValue, type FieldDef } from '../src/client/lan-gateway-card.tsx'
+import { apply, inject } from '../src/client/index.ts'
+import {
+  FIELDS,
+  LanGatewayCard,
+  cardTitle,
+  formatValue,
+  parseValue,
+  type FieldDef,
+} from '../src/client/lan-gateway-card.tsx'
 
 /** The tri-state field definition, as the card declares it. */
 const secureCookies = FIELDS.find(f => f.field === 'secureCookies') as FieldDef
@@ -53,5 +64,117 @@ describe('settings-card tri-state field', () => {
 
   it('rejects an unknown option rather than inventing a value', () => {
     expect(parseValue(secureCookies, 'yes')).toBeUndefined()
+  })
+})
+
+/** One captured `ctx.slots.register` call, with the component it carried. */
+interface Registration {
+  name: string
+  id?: string
+  order?: number
+  label?: string | (() => string)
+  component: unknown
+}
+
+/**
+ * The client seams `apply()` drives, captured instead of mounted: the slots
+ * ledger, and a `configForms.whileServed` that serves a namespace only when a
+ * test says so.
+ */
+function fakeClientContext(): {
+  ctx: never
+  registrations: Registration[]
+  watched: () => readonly string[] | undefined
+  serve: (namespace: string) => void
+  unserve: () => void
+} {
+  const registrations: Registration[] = []
+  let watched: readonly string[] | undefined
+  let registerFn: ((served: ReadonlySet<string>) => () => void) | undefined
+  let dispose: (() => void) | undefined
+
+  const ctx = {
+    effect(body: () => unknown) { body() },
+    configForms: {
+      whileServed(
+        namespaces: readonly string[],
+        register: (served: ReadonlySet<string>) => () => void,
+      ): () => void {
+        watched = namespaces
+        registerFn = register
+        return () => { registerFn = undefined }
+      },
+    },
+    slots: {
+      inject(_name: string, callback: () => () => void): () => void {
+        return callback()
+      },
+      register(options: Registration, component: unknown): () => void {
+        registrations.push({ ...options, component })
+        return () => {
+          const index = registrations.findIndex(entry => entry.component === component)
+          if (index >= 0) registrations.splice(index, 1)
+        }
+      },
+    },
+  }
+
+  return {
+    ctx: ctx as never,
+    registrations,
+    watched: () => watched,
+    serve: (namespace: string) => {
+      dispose = registerFn?.(new Set([namespace]))
+    },
+    unserve: () => { dispose?.() },
+  }
+}
+
+describe('settings-card slot registration', () => {
+  it('requires the slots ledger and the settings mirror', () => {
+    // The card mounts through `slots`; the gate that decides whether the Host
+    // can serve a write at all reads `configForms`.
+    expect(inject).toContain('slots')
+    expect(inject).toContain('configForms')
+  })
+
+  it('registers into the Plugins page slot, under the profile entry id', () => {
+    const h = fakeClientContext()
+    apply(h.ctx)
+
+    // The Host must serve the entry first: an unserved namespace means no
+    // Loader entry, so every save would answer 409.
+    expect(h.registrations).toHaveLength(0)
+    expect(h.watched()).toEqual(['dsh-lan-gateway'])
+
+    h.serve('dsh-lan-gateway')
+    expect(h.registrations).toHaveLength(1)
+    // `settings.plugin.item` was retired in 0.1.7 — a card left there never
+    // mounts, which is the regression this pins.
+    expect(h.registrations[0]?.name).toBe('plugins.item')
+    expect(h.registrations[0]?.id).toBe('dsh-lan-gateway')
+    expect(h.registrations[0]?.order).toBe(30)
+    expect(h.registrations[0]?.component).toBe(LanGatewayCard)
+  })
+
+  it('carries a label thunk so the page follows the browser language', () => {
+    const h = fakeClientContext()
+    apply(h.ctx)
+    h.serve('dsh-lan-gateway')
+
+    const label = h.registrations[0]?.label
+    expect(typeof label).toBe('function')
+    expect((label as () => string)()).toBe(cardTitle())
+    expect(cardTitle().length).toBeGreaterThan(0)
+  })
+
+  it('withdraws the card once the Host stops serving the entry', () => {
+    const h = fakeClientContext()
+    apply(h.ctx)
+    h.serve('dsh-lan-gateway')
+    expect(h.registrations).toHaveLength(1)
+
+    h.unserve()
+    expect(h.registrations).toHaveLength(0)
   })
 })

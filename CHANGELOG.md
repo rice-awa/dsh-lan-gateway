@@ -1,5 +1,17 @@
 # 更新日志
 
+## 0.6.0
+
+适配 dsh 0.1.7 对 settings 服务的重写。**这是破坏性变更**：peer 收敛为 `@deepseek-ai/dsh-settings` / `dsh-tools` `^0.1.7-rc.2 || ^0.2.0-rc.1`，0.1.2–0.1.5 线不再支持（两份 API 的配置语义不同——引用 vs 值——混在一份代码里会显著放大守卫判断出错的风险）。两条线都已验证：`pnpm typecheck` 与全量 190 项测试在 0.1.7-rc.2 与 0.2.0-rc.2 上均通过。
+
+**插件卡片迁移到 Plugins 页（0.1.7 的槽改名）。** 0.1.7 移除了按 settings 命名空间派发的 `settings.plugin.item` 槽：Host 侧的写入路径修好之后，界面上依旧没有任何入口，卡片根本不挂载。现在客户端按官方约定注册进 Plugins 页的 `plugins.item` 列表槽（`label` 随浏览器语言、`order` 决定位置；`view: 'summary'` 渲染单行摘要，`view: 'page'` 渲染页面主体），并用 `configForms.whileServed(['dsh-lan-gateway'])` 把注册挂在 Host 真正 served 该条目之后——没有 Loader 条目时每次保存都会 409，此时卡片干脆不出现，而不是出现一张写不进去的死卡片。槽契约改为从 `@deepseek-ai/dsh-client-ui-plugin-manager/client` 以 `import type` 取用（官方文档指定的方式，运行时不引入该包）：上游再改槽名会在 `pnpm typecheck` 报错，而不是卡片静默消失。
+
+**Host 侧适配 0.1.7 的 settings 重写。** `settingsScope` / `SettingsProvider` / `settings.register(ns, Config, { base })` 全部被移除，`ctx.inject(['settings'], ...)` 回调第一句就抛 TypeError，`settingsAttached` 永远为 false：卡片保存返回 409，`lan_gateway enable` / `disable` 退化成只写内存、重启即丢。现在 `Config` 每个字段都是 `.volatile()`（0.1.7 只把 volatile 字段投影进表单，其他路径一律 `not volatile`），配置一律经 `readConfig()` 解引用读取——volatile 字段在 `apply` 里是 `createVolatile` 引用而非值，直接读会拿到对象、`JSON.stringify` 渲染成 `{}`，fail-closed 启动守卫会因此判一个恒真的对象。写入按 **profile 条目 id** 寻址（id 取自 `ctx.fiber.entry?.options.id`，写入走 `settings.update(entryId, patch)` / `settings.mutate(entryId, ops)`），并监听 `loader/volatile-update` 重新 reconcile；没有条目 id 时（无 Loader）才退回内存意图与 409。
+
+**Windows 上的测试隔离。** `os.homedir()` 在 Windows 上不读 `HOME` 而读 `USERPROFILE`，而 management-plane 测试只重定向了 `HOME`：在 Windows 上它读写的是开发者真实的 `~/.dsh/lan-gateway/state.json`，同文件前面的用例刚设过密码，后面「应当还没有密码」的断言必然失败，并且会真的轮换真实 cookie secret、改写真实 state 文件。现在两个变量一起重定向并还原，全量测试在 Windows 上首次全绿。
+
+**测试面。** `tests/settings-card.test.ts` 新增卡片注册契约的回归测试：槽名必须是 `plugins.item`、条目 id 为 `dsh-lan-gateway`、`label` 是随浏览器语言变化的 thunk、Host 不再 served 时撤销注册——把 0.1.7 那次槽改名从「静默消失」变成测试失败。测试总数 186 → 190。
+
 ## 0.5.5
 
 一轮架构复审的修复，覆盖 C1–C6 / D1–D14。与 0.5.4 的 G 系列不同，这一轮既有行为缺陷，也有结构清理：请求判定从 `LanGateway` 中拆出，配置契约收敛到一处，运行意图不再有两个真相源。

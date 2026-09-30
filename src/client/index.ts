@@ -7,10 +7,9 @@
  *    installs a getRandomValues-backed `randomUUID` on the Crypto prototype at
  *    module scope. With TLS enabled the origin is secure and the shim is a
  *    no-op.
- * 2. Settings card: registers the LAN gateway card into the official
- *    Settings → Plugins page (`settings.plugin.item` slot), editing the
- *    `lan-gateway` settings namespace so port, CIDRs, auth, and TLS are
- *    adjustable from the GUI.
+ * 2. Settings card: registers the LAN gateway card into the official Plugins
+ *    page (`plugins.item` slot) so port, CIDRs, auth, and TLS stay adjustable
+ *    from the GUI.
  */
 
 /** RFC 4122 v4 UUID from crypto.getRandomValues (available on insecure origins). */
@@ -62,12 +61,25 @@ export function installRandomUuidShim(): boolean {
 installRandomUuidShim()
 
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-import { LanGatewayCard } from './lan-gateway-card.tsx'
+// Type-only, and never bundled: the Plugins page's slot contract (`plugins.item`)
+// and the settings domain's `configForms` service both resolve from the web
+// shell's frozen module table. Importing them is what subjects the registration
+// below to the platform's own contract instead of a local copy that drifts the
+// next time upstream renames a slot.
+import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
+import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+import { LanGatewayCard, cardTitle } from './lan-gateway-card.tsx'
 
 export const name = 'dsh-lan-gateway'
 
-/** Only the slots service: the card itself is self-loading (ModLens-style). */
-export const inject = ['slots']
+/**
+ * The profile entry id this plugin's bundle patch composes it under, and the
+ * settings namespace dsh ≥ 0.1.7 addresses every write by.
+ */
+const ENTRY_ID = 'dsh-lan-gateway'
+
+/** The slots service the card rides, and the settings mirror the gate reads. */
+export const inject = ['slots', 'configForms']
 
 /**
  * Mount the settings card and the UUID shim.
@@ -76,28 +88,26 @@ export const inject = ['slots']
 export function apply(ctx: ClientContext): void {
   installRandomUuidShim()
 
-  // The card rides the official Plugins → Configurable tab. Like ModLens, it
-  // registers with no inject face and fetches its own loopback config route,
-  // so it has no settings/locale/connection service dependencies.
+  // The card rides the official Plugins page. Like ModLens it registers with no
+  // inject face and fetches its own loopback config route, so it depends on no
+  // settings, locale, or connection service.
   //
-  // The `settings.plugin.item` slot is keyed BY the settings namespace the
-  // card edits (rc.8 contract): the configurable tab only dispatches entries
-  // whose `options.key` is both present and served by the Host's settings
-  // describe mirror. Registering with `id` alone throws
-  // `keyed slot "settings.plugin.item" requires options.key` and the card
-  // silently disappears from Settings → Plugins.
+  // dsh 0.1.7 replaced the namespace-keyed `settings.plugin.item` slot with the
+  // list slot `plugins.item`, which is where a host-plane plugin's own
+  // configuration page belongs ("one companion package per host-plane
+  // namespace"); the page renders the contribution as the card's one-liner and,
+  // once opened, as the body of the plugin's own page. Registering into the
+  // retired slot left the card invisible on 0.1.7.
   //
-  // `id`/`order` ride the legacy list-slot shape (older DSH versions
-  // dispatched this slot by id): harmless metadata on the keyed slot, and
-  // what keeps the card mounting if this plugin ever loads into an older
-  // deployment. Spread from a typed constant so the keyed registration type
-  // stays exact.
-  const legacyListOptions = { id: 'lan-gateway', order: 30 } as const
-  ctx.slots.inject('settings.plugin.item', function* () {
-    yield ctx.slots.register({
-      name: 'settings.plugin.item',
-      key: 'lan-gateway',
-      ...legacyListOptions,
-    }, LanGatewayCard)
-  })
+  // `whileServed` keeps the entry off the page until the Host's settings mirror
+  // serves this plugin's entry. That is the one gate worth having: without a
+  // Loader entry there is nothing to write to, and the card would appear only
+  // to fail every save with the route's 409.
+  ctx.effect(() => ctx.configForms.whileServed([ENTRY_ID], () =>
+    ctx.slots.inject('plugins.item', () => ctx.slots.register({
+      name: 'plugins.item',
+      id: ENTRY_ID,
+      order: 30,
+      label: () => cardTitle(),
+    }, LanGatewayCard))))
 }

@@ -3,6 +3,10 @@
 把 DeepSeek Harness 的 Web GUI 安全地开放到局域网 / 公网（含 TLS 与官方设置页
 卡片）。功能与用法见 [README](README.md)；本文件只有一件事：**装好它**。
 
+> **底座要求：dsh ≥ 0.1.7。** 0.1.7 重写了 settings 服务：配置写入按 **profile
+> 条目 id** 寻址，`.volatile()` 配置字段以**引用**而非值交到插件手里。0.1.2–0.1.5
+> 线已不再支持（peer 范围已相应收敛）。
+
 本文件分两条路径：
 
 - **For agents** —— 给 dsh / Claude 等 agent 的完整执行流程（含验证步骤），把这段话
@@ -105,11 +109,11 @@ dsh --profile web
 - `lan_gateway set-password` 且 `password: <≥8 位密码>`——设置登录密码。
 - `lan_gateway enable`——开启监听。若仍被拒，按报错提示满足启动条件：删除遗留的
   `authRequired: false`（v0.5 起认证恒为必需）、提供加密入口（`tlsEnabled` /
-  `trustedTerminator` / 显式 `allowInsecurePlaintext: true`）、底座需 ≥ 0.1.2-rc.1
+  `trustedTerminator` / 显式 `allowInsecurePlaintext: true`）、底座需 ≥ 0.1.7
   才能开 `lanPasswordless`。
 
 > LAN 想免登录是**显式 opt-in**：设 `lanPasswordless: true`（默认 `false`）只豁免网关
-> 登录页，且需要 dsh ≥ 0.1.2-rc.1 的上游会话认证底座；底座不支持时该开关会被拒绝启用。
+> 登录页，且需要 dsh ≥ 0.1.7 的上游会话认证底座；底座不支持时该开关会被拒绝启用。
 
 ---
 

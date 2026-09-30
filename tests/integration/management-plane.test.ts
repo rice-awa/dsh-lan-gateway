@@ -11,9 +11,12 @@
  * in place. `MemorySettings` below reproduces both, so a route save really does
  * change what the listener resolves.
  *
- * `process.env.HOME` is pointed at a temp dir before anything runs: `state.ts`
- * and `tls.ts` both resolve `~/.dsh/lan-gateway` through `os.homedir()`, which
- * reads `HOME` at call time, so the plugin's real files are never touched.
+ * `HOME` and `USERPROFILE` are pointed at a temp dir before each test:
+ * `state.ts` and `tls.ts` both resolve `~/.dsh/lan-gateway` through
+ * `os.homedir()` at call time, and Windows answers that from `USERPROFILE`
+ * rather than from `HOME`. Redirecting only `HOME` left this suite reading a
+ * state file an earlier test had just written — and overwriting the
+ * developer's real one — on Windows.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -284,21 +287,49 @@ async function freePort(): Promise<number> {
   })
 }
 
+/**
+ * The environment variables `os.homedir()` reads: `HOME` on POSIX,
+ * `USERPROFILE` on Windows (which ignores `HOME` entirely).
+ */
+const HOME_ENV_KEYS = ['HOME', 'USERPROFILE'] as const
+
+/**
+ * Point `os.homedir()` at a temp dir, returning what to restore afterwards.
+ * @param to - the home directory the plugin should resolve.
+ * @returns the saved value of every key touched.
+ */
+function redirectHome(to: string): Array<[string, string | undefined]> {
+  return HOME_ENV_KEYS.map((key) => {
+    const saved = process.env[key]
+    process.env[key] = to
+    return [key, saved]
+  })
+}
+
+/**
+ * Restore the home variables captured by {@link redirectHome}.
+ * @param saved - the values returned by the redirect.
+ */
+function restoreHome(saved: Array<[string, string | undefined]>): void {
+  for (const [key, value] of saved) {
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
+}
+
 let home = ''
-let originalHome: string | undefined
+let savedHome: Array<[string, string | undefined]> = []
 let live: Harness[] = []
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'lan-gateway-mgmt-'))
-  originalHome = process.env['HOME']
-  process.env['HOME'] = home
+  savedHome = redirectHome(home)
   live = []
 })
 
 afterEach(async () => {
   for (const h of live) await h.dispose()
-  if (originalHome === undefined) delete process.env['HOME']
-  else process.env['HOME'] = originalHome
+  restoreHome(savedHome)
   rmSync(home, { recursive: true, force: true })
 })
 

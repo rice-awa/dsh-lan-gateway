@@ -14,7 +14,7 @@ pnpm is the package manager (`packageManager` field, pnpm@11.20.0). Node 22 in C
 pnpm install
 pnpm build        # tsdown: builds BOTH bundles (host lib/index.js + client lib/client.js)
 pnpm typecheck    # two tsconfigs, both must pass
-pnpm test         # vitest run, 186 tests
+pnpm test         # vitest run, 190 tests
 npx vitest run tests/gateway.test.ts   # one file
 npx vitest run -t "rate limit"         # one test by name
 ```
@@ -28,7 +28,7 @@ Local install into a dsh profile uses `pnpm add "link:/path/to/dsh-lan-gateway"`
 Two bundles, one repo.
 
 - **Host** — `src/index.ts` → `lib/index.js` (ESM, node). The cordis plugin.
-- **Client** — `src/client/index.ts` → `lib/client.js` (CJS, browser), wrapped in the `window.__ModuleLoader__.load` closure the dsh web shell expects. It carries two things: an insecure-origin `crypto.randomUUID` shim installed at module scope (before any RPC mints an id, because the gateway can serve plain-HTTP LAN origins where `randomUUID` is absent) and the Settings → Plugins card. `PLATFORM_MODULES` in `tsdown.config.ts` are externals resolved from the web shell's frozen module table — never bundle them.
+- **Client** — `src/client/index.ts` → `lib/client.js` (CJS, browser), wrapped in the `window.__ModuleLoader__.load` closure the dsh web shell expects. It carries two things: an insecure-origin `crypto.randomUUID` shim installed at module scope (before any RPC mints an id, because the gateway can serve plain-HTTP LAN origins where `randomUUID` is absent) and the Plugins page card (the `plugins.item` slot, under the entry id `dsh-lan-gateway`). `PLATFORM_MODULES` in `tsdown.config.ts` are externals resolved from the web shell's frozen module table — never bundle them.
 
 Host modules:
 
@@ -67,6 +67,7 @@ WebSocket upgrades run the same gates through `handleUpgrade`, and each upgraded
 - **One run intent, two writers.** The composition base (`cordis.patch.yml`) is authoritative until the settings service attaches, after which this plugin's own profile entry wins. The tool's `enable` / `disable` go through `setRunIntent`, which writes the `enabled` field the card also writes — so either surface can undo the other, and a restart honours whichever spoke last. Only when no settings service exists does the intent fall back to the in-memory `manualOverride`.
 - **A volatile config field is a reference, never a value.** Since dsh 0.1.7 a `.volatile()` field arrives in `apply` as a `ConfigRef` (`createVolatile`) — reading it directly yields an object, and `JSON.stringify` renders it as `{}`, so a guard that tests `cfg.tlsEnabled` for truthiness would silently pass. Every read goes through `readConfig(refs)`, which is why it exists; a fresh `Config(raw)` validation produces the same reference shape, hence `validateConfig` for candidate checks. The Loader reflects a committed settings write by updating those references in place (no remount) and emitting `loader/volatile-update`, which is what the plugin re-syncs on.
 - **Settings writes are addressed by profile entry id.** `settingsScope` and the `lan-gateway` settings namespace were removed in 0.1.7; the id comes from `ctx.fiber.entry?.options.id`, and without a Loader (or without the service) there is no entry to write, so the tool's intent falls back to memory and `/lan-gateway/config` answers 409 pointing at the profile patch.
+- **The client card rides the Plugins page's `plugins.item` slot, under the profile entry id.** dsh 0.1.7 retired the namespace-keyed `settings.plugin.item` slot the card used to register into; its replacement hands a contribution a `view` (`summary` for the list one-liner, `page` for the page body, whose title and crumb the page draws itself). Registration is gated on `configForms.whileServed(['dsh-lan-gateway'])` — the same id the bundle patch composes and the Host writes by — so a deployment with no Loader entry shows no card rather than one whose every save answers 409. The slot contract is merged from `@deepseek-ai/dsh-client-ui-plugin-manager/client` with `import type` (never a runtime import), so an upstream rename fails `pnpm typecheck` instead of quietly unmounting the card.
 - **All lifecycle work is serialized.** Every start/stop/restart goes through `enqueue()`, so a config save, a password set and a tool call cannot interleave a listener teardown with a start. Anything that changes what `desiredConfig()` resolves must go through it.
 
 ### Adding a config field
@@ -80,7 +81,8 @@ Touches, at minimum: the `Config` interface, the `z.object` schema and the `read
 - `tests/integration/gateway.test.ts` — real sockets against an in-process fake upstream. Source class is posed through the injectable `classifySource` on `GatewayConfig` rather than by binding other addresses.
 - `tests/upstream-session.test.ts` — real loopback token exchange against an in-process minter.
 - `tests/request-policy.test.ts` — the decision seam, against literal `RequestHead` objects: path normalization, owned prefix, same-site and login fences, and both directions of the header transforms.
-- `tests/integration/management-plane.test.ts` — a fake cordis context running the real `apply()` with a stand-in for the 0.1.7 settings service, so the `lan_gateway` tool and the card's config route are exercised against one shared state. The fake exposes the 0.1.7 surface and deliberately *not* `register`, and it reflects a write into the volatile config references the way the Loader does — so a plugin that still calls the removed API fails here. `process.env.HOME` is redirected to a temp dir; `state.ts` and `tls.ts` both resolve `homedir()` at call time, so the plugin's real files are never touched.
+- `tests/settings-card.test.ts` — the card's tri-state field codec, plus the slot-registration contract: the card registers into `plugins.item` under `dsh-lan-gateway`, carries a label thunk, and withdraws once the Host stops serving the entry.
+- `tests/integration/management-plane.test.ts` — a fake cordis context running the real `apply()` with a stand-in for the 0.1.7 settings service, so the `lan_gateway` tool and the card's config route are exercised against one shared state. The fake exposes the 0.1.7 surface and deliberately *not* `register`, and it reflects a write into the volatile config references the way the Loader does — so a plugin that still calls the removed API fails here. `HOME` *and* `USERPROFILE` are redirected to a temp dir, because Windows answers `os.homedir()` from the latter; `state.ts` and `tls.ts` both resolve `homedir()` at call time, so the plugin's real files are never touched.
 - `tests/integration/session-races.test.ts` — the races the audit named: a credential change landing mid-sign-in (D9) or mid-handshake (D10), and an upstream that answers a WebSocket upgrade with a non-101 (D12). `verifyPassword` is partially mocked to a hand-settled promise, because scrypt resolves too fast for the window to be observable otherwise.
 - `tsconfig.json` excludes `src/client` and the two client tests; `tsconfig.client.json` (dom + `jsx: react-jsx`) includes exactly those. `pnpm typecheck` runs both, so a client-only change still needs the second config.
 
