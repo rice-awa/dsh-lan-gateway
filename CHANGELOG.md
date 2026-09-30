@@ -1,5 +1,15 @@
 # 更新日志
 
+## 0.6.1
+
+改密码不再只能让模型调工具。**Plugins 页的插件卡片顶部新增「登录密码」栏**：状态徽标显示「已设置 / 未设置」，两个密码框（新密码、再次输入），点「修改密码」直接覆盖原密码。旧密码不回显、也不要求输入——界面只报告密码是否存在，`~/.dsh/lan-gateway/state.json` 里只有 scrypt 哈希与盐，接口从不把哈希、盐、明文乃至长度发给浏览器。改完立即生效：递增会话代次，旧密码失效，所有已登录会话与已建立的 WebSocket 一并作废。
+
+**为什么是独立路由。** 密码不是配置键：它不写进 profile 条目，也绝不能出现在 `--dump-config` 里。因此新增 `POST /lan-gateway/password`，与 `/lan-gateway/config` 共用同一道围栏（Host 必须为回环、拒绝跨站、写操作必须带与 Host 匹配的 `Origin`）；网关对本插件整个 `/lan-gateway*` 前缀一律 403，所以远程浏览器仍然只能用 `lan_gateway` 工具。请求体为 `{"password": "..."}`，成功返回与配置路由同一份快照再加 `passwordSet` 布尔值。改密逻辑抽成 `applyPassword`，与工具的 `set-password` **共用同一份实现**：递增代次、首次设密码时重新 reconcile「已启用但无密码」的意图，两个入口不会再分叉。
+
+**该路由只设置、不清空。** 清空密码按设计会停掉监听器，卡片上放一个能悄悄掐断远程访问的按钮是陷阱；清空仍走 `lan_gateway set-password`（密码留空即清空）。密码最小长度抽到 host 与 client 共享的 `MIN_PASSWORD_LENGTH`，卡片表单与服务端路由读同一个常量，卡片放行的草稿不会被 400 拒绝。
+
+**测试面。** `tests/integration/management-plane.test.ts` 新增 9 项：覆盖原密码后旧密码失效、代次递增、响应不回泄明文/哈希/盐、读路径只报告 `passwordSet`、过短密码 400 且旧密码仍然有效、空值与非字符串被拒、非 POST 405、非回环 Host 403、无 settings 服务时仍可改密、以及首设密码对「待启用」意图的 reconcile。`tests/settings-card.test.ts` 新增 5 项覆盖密码草稿闸门（长度、确认、空表单）。测试总数 190 → 204。
+
 ## 0.6.0
 
 适配 dsh 0.1.7 对 settings 服务的重写。**这是破坏性变更**：peer 收敛为 `@deepseek-ai/dsh-settings` / `dsh-tools` `^0.1.7-rc.2 || ^0.2.0-rc.1`，0.1.2–0.1.5 线不再支持（两份 API 的配置语义不同——引用 vs 值——混在一份代码里会显著放大守卫判断出错的风险）。两条线都已验证：`pnpm typecheck` 与全量 190 项测试在 0.1.7-rc.2 与 0.2.0-rc.2 上均通过。

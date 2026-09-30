@@ -23,8 +23,10 @@ import {
   cardTitle,
   formatValue,
   parseValue,
+  passwordProblem,
   type FieldDef,
 } from '../src/client/lan-gateway-card.tsx'
+import { MIN_PASSWORD_LENGTH } from '../src/config-fields.ts'
 
 /** The tri-state field definition, as the card declares it. */
 const secureCookies = FIELDS.find(f => f.field === 'secureCookies') as FieldDef
@@ -64,6 +66,35 @@ describe('settings-card tri-state field', () => {
 
   it('rejects an unknown option rather than inventing a value', () => {
     expect(parseValue(secureCookies, 'yes')).toBeUndefined()
+  })
+})
+
+describe('settings-card password draft gate', () => {
+  it('takes its length bound from the constant the host route enforces', () => {
+    // The route answers 400 below this bound, so the card must not enable a
+    // draft the route would reject.
+    const short = 'a'.repeat(MIN_PASSWORD_LENGTH - 1)
+    const exact = 'a'.repeat(MIN_PASSWORD_LENGTH)
+    expect(passwordProblem(short, short)).toBe('tooShort')
+    expect(passwordProblem(exact, exact)).toBeNull()
+  })
+
+  it('reports the length problem before a mismatched confirmation', () => {
+    // An untouched confirm box is a mismatch too; the useful message is the
+    // one about the password itself.
+    expect(passwordProblem('short', '')).toBe('tooShort')
+  })
+
+  it('reports a mismatch once the length is satisfied', () => {
+    expect(passwordProblem('correct-horse', 'correct-hors')).toBe('mismatch')
+  })
+
+  it('refuses to submit an empty form', () => {
+    expect(passwordProblem('', '')).toBe('tooShort')
+  })
+
+  it('accepts a confirmed draft of at least the minimum length', () => {
+    expect(passwordProblem('correct-horse', 'correct-horse')).toBeNull()
   })
 })
 

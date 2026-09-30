@@ -6,7 +6,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/DeepSeek%20Harness-4d6bfe?logo=deepseek&logoColor=fff&style=flat-square" alt="DeepSeek Harness" />
-  <img src="https://img.shields.io/badge/version-0.6.0-2b7fff?style=flat-square" alt="version 0.6.0" />
+  <img src="https://img.shields.io/badge/version-0.6.1-2b7fff?style=flat-square" alt="version 0.6.1" />
   <img src="https://img.shields.io/badge/TLS-8b5cf6?logo=lock&logoColor=fff&style=flat-square" alt="TLS" />
   <img src="https://img.shields.io/github/license/rice-awa/dsh-lan-gateway?style=flat-square" alt="MIT license" />
   <a href="https://awesome-dsh-plugin.com"><img src="https://awesome-dsh-plugin.com/badge.svg" alt="awesome · DSH plugin" /></a>
@@ -44,10 +44,10 @@ cd dsh-lan-gateway
 pnpm install
 pnpm build          # host → lib/index.js
 pnpm build:client   # client → lib/client.js
-pnpm test           # 117 项
+pnpm test           # 204 项
 ```
 
-仓库里还有一个 [lan-gateway](skills/lan-gateway.md) 技能，安装后可直接在 dsh 对话里说「设置网关密码为 …」「开启远程访问」，agent 会调用 `lan_gateway` 工具完成，密码以参数传入，不写入配置，也不回显。安装方式见 [INSTALL.md](INSTALL.md#for-agents完整安装流程)。
+仓库里还有一个 [lan-gateway](skills/lan-gateway.md) 技能，安装后可直接在 dsh 对话里说「设置网关密码为 …」「开启远程访问」，agent 会调用 `lan_gateway` 工具完成，密码以参数传入，不写入配置，也不回显。改密码也可以不走模型：在本机打开 **Plugins** 页的「LAN 网关」卡片，直接填两次新密码覆盖（见下「登录密码」）。安装方式见 [INSTALL.md](INSTALL.md#for-agents完整安装流程)。
 
 如需在手机 / 平板上访问，可另外安装 [dsh-web-mobile](https://github.com/mexiaosqwq/dsh-web-mobile) 做移动端 UI 适配：
 
@@ -66,11 +66,11 @@ lan_gateway tls-regenerate    # 换发自签名证书（tlsMode=self-signed 时�
 lan_gateway disable           # 关闭
 ```
 
-`lan_gateway` 是模型可调用的工具，上述命令无需手动执行。直接在对话里说「查看网关状态」「设置网关密码为 ……」即可，密码以参数传给模型，不会写入任何配置文件。
+`lan_gateway` 是模型可调用的工具，上述命令无需手动执行。直接在对话里说「查看网关状态」「设置网关密码为 ……」即可，密码以参数传给模型，不会写入任何配置文件。改密码也可以完全不经模型：在本机 Plugins 页的插件卡片里直接改（见下「登录密码」）。
 
 ## 配置
 
-所有可调项都写在本插件自己的 profile 条目里（dsh ≥ 0.1.7 起，设置写入按**条目 id** 寻址；此前的 `lan-gateway` 用户设置命名空间已随 `settingsScope` 一起移除）。打开侧边栏的 **Plugins** 页，在官方插件列表里点开「LAN 网关」卡片即可修改，保存即生效，监听器会按新配置自动重启。卡片挂在 Plugins 页的 `plugins.item` 槽上，且只在底座确实 served 本插件条目时注册——没有 Loader 条目（写入必然 409）时卡片不会出现。下表既是卡片字段，也是配置键：
+所有可调项都写在本插件自己的 profile 条目里（dsh ≥ 0.1.7 起，设置写入按**条目 id** 寻址；此前的 `lan-gateway` 用户设置命名空间已随 `settingsScope` 一起移除）。打开侧边栏的 **Plugins** 页，在官方插件列表里点开「LAN 网关」卡片即可修改，保存即生效，监听器会按新配置自动重启。卡片挂在 Plugins 页的 `plugins.item` 槽上，且只在底座确实 served 本插件条目时注册——没有 Loader 条目（写入必然 409）时卡片不会出现。下表既是卡片字段，也是配置键；卡片顶部另有一栏「登录密码」，改密码不走配置表（见下「登录密码」）：
 
 | 键 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -94,6 +94,16 @@ lan_gateway disable           # 关闭
 默认 `lanCidrs`：`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`、`169.254.0.0/16`。IPv6 的 `fe80::/10`（link-local）与 `127.0.0.0/8`、`::1` 归为 LAN/loopback。
 
 配置里残留 `authRequired: false`（v0.4 及更早的写法）会被启停守卫拒绝并提示迁移，不会静默降级成免密。
+
+### 登录密码
+
+卡片顶部就是「登录密码」栏：一个「已设置 / 未设置」状态，两个密码框（新密码、再次输入），点「修改密码」直接覆盖原密码。
+
+- **不回显旧密码。** 界面只报告密码是否存在；卡片读不到旧密码。`state.json` 里只有 scrypt 哈希与盐，`/lan-gateway/password` 也从不把哈希、盐或长度返回给浏览器。
+- **不需要旧密码。** 该路由与配置路由共用同一道围栏：只接受本机 loopback 的同源请求（Host 必须是回环、跨站请求拒绝、写操作必须带匹配的 `Origin`），经网关远程访问的浏览器一律 403。能通过这道门的本地用户本来就能读 `~/.dsh`。
+- **改完即生效。** 写盘后递增会话代次：旧密码立即失效，所有已登录会话与已建立的 WebSocket 全部作废，各来源需要重新登录。
+- **只设置，不清空。** 清空密码会按设计停掉监听器（没有密码不允许监听），卡片不做这件事；要清空请用 `lan_gateway set-password` 并留空密码。
+- **密码不是配置键。** 它不写进 profile 条目，也不会出现在 `--dump-config` 里；保存配置字段动不到它，改密码也不会碰你尚未保存的字段草稿。
 
 ### 入口加密
 
@@ -194,7 +204,7 @@ client bundle 在模块级给 `Crypto` 原型补一个基于 `crypto.getRandomVa
 ## 开发
 
 ```bash
-pnpm test        # 117 项
+pnpm test        # 204 项
 pnpm typecheck   # tsc 双端（host + client）
 ```
 
@@ -209,12 +219,13 @@ pnpm typecheck   # tsc 双端（host + client）
 ✓ tests/x509.test.ts                           ( 6) 自签名证书 DER/SAN/签名/TLS 握手
 ✓ tests/tls.test.ts                            ( 9) 证书持久化 / 到期换发 / 重生成 / 自定义证书加载
 ✓ tests/uuid-shim.test.ts                      ( 3) 不安全源补丁 / 安全源 no-op / v4 正确性
-✓ tests/settings-card.test.ts                  (10) 设置页字段编解码（三态 auto ↔ false 不可混淆）/
-                                                    卡片注册槽与条目 id 契约
+✓ tests/settings-card.test.ts                  (15) 设置页字段编解码（三态 auto ↔ false 不可混淆）/
+                                                    卡片注册槽与条目 id 契约 / 密码草稿闸门（长度与确认）
 ✓ tests/integration/gateway.test.ts            (26) 真实网关端到端：全来源登录 / LAN 豁免 / 跨站 403 / 升级拒绝 /
                                                     cookie 属性 / epoch 撤销 / 逐会话登出 / 尾斜杠 / IPv6 / 会话中继
-✓ tests/integration/management-plane.test.ts   (15) 真实 apply()：工具与卡片交替启停 / 未编辑字段与未知键保留 /
-                                                    清空后继承 / 拒绝不可启动配置
+✓ tests/integration/management-plane.test.ts   (24) 真实 apply()：工具与卡片交替启停 / 未编辑字段与未知键保留 /
+                                                    清空后继承 / 拒绝不可启动配置 / 卡片改密路由（覆盖原密码 /
+                                                    递增代次 / 不返回哈希 / 不给清空 / 无 settings 也生效）
 ✓ tests/integration/session-races.test.ts      ( 8) 改密落在登录与握手途中的竞态 / 上游非 101 应答
 ```
 

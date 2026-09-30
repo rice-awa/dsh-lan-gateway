@@ -31,9 +31,12 @@
  * Every tunable is also exposed as the `lan-gateway` user-settings namespace
  * (`ctx.settings`), so the official DSH Settings → Plugins page can adjust
  * port, CIDRs, auth, and TLS live; the running listener restarts on change.
- * The card reads/writes through the loopback-only `/lan-gateway/config` route;
- * remote browsers get a 403 from the gateway for that prefix and manage the
- * gateway through the `lan_gateway` tool instead.
+ * The card reads/writes through the loopback-only `/lan-gateway/config` route
+ * and changes the login password through the loopback-only
+ * `/lan-gateway/password` route (the credential is a secret in `state.json`,
+ * never a settings key, so it cannot ride a config patch); remote browsers get
+ * a 403 from the gateway for that whole prefix and manage the gateway through
+ * the `lan_gateway` tool instead.
  *
  * Disabled by default in the bundle patch (safe): the listener opens only
  * after `lan_gateway enable` or `enabled: true`.
@@ -53,6 +56,7 @@ import type {} from '@deepseek-ai/cordis-plugin-loader'
 import { DEFAULT_LAN_CIDR_STRINGS, originMatchesHost } from './auth.ts'
 import {
   CONFIG_FIELD_KEYS,
+  MIN_PASSWORD_LENGTH,
   OPTIONAL_CONFIG_KEYS,
 } from './config-fields.ts'
 import { LanGateway } from './gateway.ts'
@@ -677,6 +681,50 @@ export function apply(ctx: Context, config: ConfigRefs): void {
     manualOverride = enabled
   }
 
+  /**
+   * Apply a login-password change and reconcile the listener. One
+   * implementation behind both surfaces the operator has — the `lan_gateway`
+   * tool's `set-password` command and the Settings card's
+   * `/lan-gateway/password` route — so the epoch bump, the listener stop on a
+   * clear, and the first-password reconcile cannot diverge between them.
+   *
+   * The credential itself is never read back out: `state` holds a scrypt hash
+   * and salt, and neither is returned to a caller.
+   */
+  const applyPassword = async (password: string | undefined): Promise<ToolResult> => {
+    if (password !== undefined && password.length > 0 && password.length < MIN_PASSWORD_LENGTH) {
+      return { ok: false, message: `Password must be at least ${MIN_PASSWORD_LENGTH} characters.` }
+    }
+    const setting = password !== undefined && password.length > 0
+    const hadPassword = state.password !== undefined
+    state = await setPassword(state, setting ? password : undefined)
+    saveState(state)
+    gateway?.setState(state)
+    if (!setting) {
+      // Clearing the credential must not leave an open gateway serving
+      // sessions the old password authorized: stop the listener. A password
+      // is required to run, so a later enable fails closed.
+      await setRunIntent(false)
+      return enqueue('password cleared', async () => {
+        if (gateway !== undefined) await stopGateway()
+        lastError = 'Password cleared — the gateway listener was stopped (a password is required to run).'
+      }).then(() => ({
+        ok: true,
+        message: 'Password cleared. Session epoch advanced and the gateway listener was stopped — set a password before enabling it again.',
+      }))
+    }
+    // The first password turns a dormant "enabled but unpassworded" intent
+    // into a startable one, so reconcile: the listener was refused a moment
+    // ago for a reason that no longer holds. A later password change needs no
+    // reconcile (the listener is already running or already refused for some
+    // other reason), and reconciling anyway would be harmless but noisy.
+    if (!hadPassword) await syncGateway('password set')
+    return {
+      ok: true,
+      message: 'Password set. Session epoch advanced — every previously issued session is now invalid; all sources must sign in again.',
+    }
+  }
+
   // The tunables live in this plugin's own profile entry, and dsh 0.1.7 reaches
   // it by *entry id*: the `lan-gateway` settings namespace this plugin used to
   // register (and the scope handle it wrote through) no longer exist. The entry
@@ -735,28 +783,35 @@ export function apply(ctx: Context, config: ConfigRefs): void {
     void syncGateway('connection attach')
   })
 
-  // The Settings → Plugins card reads and writes through this loopback-only
-  // JSON route (ModLens-style: the browser never touches the settings seam
+  // The Settings → Plugins card reads and writes through these loopback-only
+  // JSON routes (ModLens-style: the browser never touches the settings seam
   // directly, so the card has no service dependencies to resolve). The gateway
-  // refuses to relay this prefix, so only the native loopback listener can
+  // refuses to relay this whole prefix, so only the native loopback listener can
   // reach it — a genuine local user, or a local process that could already read
   // ~/.dsh.
+  const sendJson = (res: ServerResponse, status: number, body: unknown): void => {
+    res.writeHead(status, { 'content-type': 'application/json' })
+    res.end(JSON.stringify(body))
+  }
+  /**
+   * What both card routes report. `passwordSet` is a boolean on purpose: the
+   * card must be able to say whether a credential exists without any part of
+   * that credential — not even its length — ever leaving this process.
+   */
+  const snapshot = (): Record<string, unknown> => {
+    const cfg = effective()
+    return {
+      config: cfg,
+      running: gateway !== undefined,
+      port: cfg.gatewayPort,
+      tls: tlsStatusLine(cfg),
+      upstreamSessionAvailable,
+      passwordSet: state.password !== undefined,
+      lastError: lastError ?? null,
+    }
+  }
   const configRouteHandler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    const snapshot = (): Record<string, unknown> => {
-      const cfg = effective()
-      return {
-        config: cfg,
-        running: gateway !== undefined,
-        port: cfg.gatewayPort,
-        tls: tlsStatusLine(cfg),
-        upstreamSessionAvailable,
-        lastError: lastError ?? null,
-      }
-    }
-    const send = (status: number, body: unknown): void => {
-      res.writeHead(status, { 'content-type': 'application/json' })
-      res.end(JSON.stringify(body))
-    }
+    const send = (status: number, body: unknown): void => sendJson(res, status, body)
     if (!isTrustedConfigRequest(req)) {
       send(403, { error: 'request refused: this route answers same-origin loopback requests only' })
       return
@@ -840,6 +895,58 @@ export function apply(ctx: Context, config: ConfigRefs): void {
     'dsh-lan-gateway: config route',
   )
 
+  // The card's password control, on its own loopback-only route. It cannot ride
+  // the config patch: the credential is a scrypt hash in `state.json`, not a
+  // settings key, and a key that reached `--dump-config` would be exactly the
+  // leak the state file exists to prevent. Same fence as the config route, so
+  // remote browsers (which the gateway answers 403 for this whole prefix) keep
+  // using the `lan_gateway` tool.
+  //
+  // This surface only *sets* a password. Clearing stops the listener by design,
+  // and a card button that silently takes remote access down is a footgun; the
+  // tool's `set-password` with an empty password remains the way to clear.
+  const passwordRouteHandler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    if (!isTrustedConfigRequest(req)) {
+      sendJson(res, 403, { error: 'request refused: this route answers same-origin loopback requests only' })
+      return
+    }
+    if (req.method !== 'POST') {
+      sendJson(res, 405, { error: 'method not allowed' })
+      return
+    }
+    const body = await readBody(req, 4 * 1024, res)
+    if (body === undefined) return // response already sent (413/400)
+    let submitted: unknown
+    try {
+      submitted = JSON.parse(body)
+    } catch {
+      sendJson(res, 400, { error: 'invalid JSON body' })
+      return
+    }
+    const password = typeof submitted === 'object' && submitted !== null && !Array.isArray(submitted)
+      ? (submitted as Record<string, unknown>)['password']
+      : undefined
+    if (typeof password !== 'string' || password.length === 0) {
+      sendJson(res, 400, {
+        error: `password must be a non-empty string of at least ${MIN_PASSWORD_LENGTH} characters; `
+          + 'this route only sets one — use the lan_gateway tool to clear it',
+      })
+      return
+    }
+    const result = await applyPassword(password)
+    if (!result.ok) {
+      sendJson(res, 400, { error: result.message })
+      return
+    }
+    // The snapshot flips `passwordSet` for the card's status badge. Nothing here
+    // carries the password, its hash, or its length back to the browser.
+    sendJson(res, 200, snapshot())
+  }
+  ctx.effect(
+    () => ctx.webServer.register({ kind: 'exact', path: '/lan-gateway/password', handler: passwordRouteHandler }),
+    'dsh-lan-gateway: password route',
+  )
+
   const controller: GatewayController = {
     status(): ToolResult {
       const cfg = desiredConfig()
@@ -875,39 +982,7 @@ export function apply(ctx: Context, config: ConfigRefs): void {
       await syncGateway('tool disable')
       return { ok: true, message: 'Gateway disabled.' }
     },
-    async setPassword(password: string | undefined): Promise<ToolResult> {
-      if (password !== undefined && password.length > 0 && password.length < 8) {
-        return { ok: false, message: 'Password must be at least 8 characters.' }
-      }
-      const setting = password !== undefined && password.length > 0
-      const hadPassword = state.password !== undefined
-      state = await setPassword(state, setting ? password : undefined)
-      saveState(state)
-      gateway?.setState(state)
-      if (!setting) {
-        // Clearing the credential must not leave an open gateway serving
-        // sessions the old password authorized: stop the listener. A password
-        // is required to run, so a later enable fails closed.
-        await setRunIntent(false)
-        return enqueue('password cleared', async () => {
-          if (gateway !== undefined) await stopGateway()
-          lastError = 'Password cleared — the gateway listener was stopped (a password is required to run).'
-        }).then(() => ({
-          ok: true,
-          message: 'Password cleared. Session epoch advanced and the gateway listener was stopped — set a password before enabling it again.',
-        }))
-      }
-      // The first password turns a dormant "enabled but unpassworded" intent
-      // into a startable one, so reconcile: the listener was refused a moment
-      // ago for a reason that no longer holds. A later password change needs no
-      // reconcile (the listener is already running or already refused for some
-      // other reason), and reconciling anyway would be harmless but noisy.
-      if (!hadPassword) await syncGateway('password set')
-      return {
-        ok: true,
-        message: 'Password set. Session epoch advanced — every previously issued session is now invalid; all sources must sign in again.',
-      }
-    },
+    setPassword: applyPassword,
     rotateSecret(): ToolResult {
       const next: GatewayState = {
         cookieSecret: randomBytes(32).toString('base64'),

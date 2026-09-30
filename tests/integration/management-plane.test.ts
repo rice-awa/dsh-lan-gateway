@@ -36,6 +36,7 @@ import {
   type ConfigRefs,
 } from '../../src/index.ts'
 import { DEFAULT_LAN_CIDR_STRINGS } from '../../src/auth.ts'
+import { loadState, verifyPassword } from '../../src/state.ts'
 
 /** The dsh port the fake web server claims; nothing listens on it. */
 const DSH_PORT = 13080
@@ -122,6 +123,10 @@ interface Harness {
   run: (args: Record<string, unknown>) => Promise<{ ok: boolean; message: string }>
   /** POST a config patch through the plugin's own route. */
   post: (body: unknown) => Promise<{ status: number; body: Record<string, unknown> }>
+  /** POST a password change through the card's password route. */
+  postPassword: (body: unknown) => Promise<{ status: number; body: Record<string, unknown> }>
+  /** GET the password route (which only accepts a POST). */
+  getPassword: () => Promise<{ status: number; body: Record<string, unknown> }>
   /** GET the route snapshot. */
   get: () => Promise<{ status: number; body: Record<string, unknown> }>
   dispose: () => Promise<void>
@@ -218,16 +223,20 @@ function harness(
 
   apply(ctx as never, refs)
 
-  const handler = (): RouteHandler => {
-    const found = routes.get('/lan-gateway/config')
-    if (found === undefined) throw new Error('the config route was never registered')
+  const handler = (path: string): RouteHandler => {
+    const found = routes.get(path)
+    if (found === undefined) throw new Error(`the ${path} route was never registered`)
     return found
   }
 
-  const callRoute = async (method: string, body?: unknown): Promise<{ status: number; body: Record<string, unknown> }> => {
+  const callRoute = async (
+    method: string,
+    body?: unknown,
+    path = '/lan-gateway/config',
+  ): Promise<{ status: number; body: Record<string, unknown> }> => {
     const req = new EventEmitter() as EventEmitter & { method: string; headers: Record<string, string>; url: string }
     req.method = method
-    req.url = '/lan-gateway/config'
+    req.url = path
     // A loopback Host with a matching Origin: the route's own fence, satisfied.
     req.headers = { host: `127.0.0.1:${DSH_PORT}` }
     if (body !== undefined) req.headers['origin'] = `http://127.0.0.1:${DSH_PORT}`
@@ -243,7 +252,7 @@ function harness(
           })
         },
       }
-      void Promise.resolve(handler()(req, res)).catch(() => {})
+      void Promise.resolve(handler(path)(req, res)).catch(() => {})
     })
 
     queueMicrotask(() => {
@@ -268,6 +277,8 @@ function harness(
       return result as { ok: boolean; message: string }
     },
     post: body => callRoute('POST', body),
+    postPassword: body => callRoute('POST', body, '/lan-gateway/password'),
+    getPassword: () => callRoute('GET', undefined, '/lan-gateway/password'),
     get: () => callRoute('GET'),
     async dispose() {
       for (const off of teardown.reverse()) await off()
@@ -424,6 +435,118 @@ describe('the Settings card save path', () => {
     const h = start(baseConfig())
     const response = await h.post({ gatewayPort: 3099 })
     expect(response.status).toBe(409)
+  })
+})
+
+describe('the Settings card password route', () => {
+  it('overwrites the stored password and advances the epoch', async () => {
+    const h = start(baseConfig(), { settings: true })
+    await h.run({ command: 'set-password', password: PASSWORD })
+    const before = loadState()
+    expect(await verifyPassword(before, PASSWORD)).toBe(true)
+
+    const response = await h.postPassword({ password: 'a-brand-new-secret' })
+
+    expect(response.status).toBe(200)
+    expect(response.body['passwordSet']).toBe(true)
+    const after = loadState()
+    expect(await verifyPassword(after, 'a-brand-new-secret')).toBe(true)
+    expect(await verifyPassword(after, PASSWORD)).toBe(false)
+    // The epoch is what retires every session the old password authorized.
+    expect(after.sessionEpoch).toBeGreaterThan(before.sessionEpoch)
+  })
+
+  it('never returns the credential or its hash', async () => {
+    const h = start(baseConfig(), { settings: true })
+    const response = await h.postPassword({ password: PASSWORD })
+    const stored = loadState().password
+    expect(stored).toBeDefined()
+    const wire = JSON.stringify(response.body)
+    expect(wire).not.toContain(PASSWORD)
+    expect(wire).not.toContain(stored!.hash)
+    expect(wire).not.toContain(stored!.salt)
+  })
+
+  it('reports set/unset on the read path without revealing anything', async () => {
+    const h = start(baseConfig(), { settings: true })
+    // The card needs this boolean to render its status badge; it is never given
+    // the credential itself, not even a length.
+    expect((await h.get()).body['passwordSet']).toBe(false)
+
+    await h.postPassword({ password: PASSWORD })
+
+    const snapshot = await h.get()
+    expect(snapshot.body['passwordSet']).toBe(true)
+    expect(JSON.stringify(snapshot.body)).not.toContain(PASSWORD)
+  })
+
+  it('refuses a too-short password and leaves the old one in force', async () => {
+    const h = start(baseConfig(), { settings: true })
+    await h.run({ command: 'set-password', password: PASSWORD })
+    const before = loadState()
+
+    const response = await h.postPassword({ password: 'short' })
+
+    expect(response.status).toBe(400)
+    const after = loadState()
+    expect(after.sessionEpoch).toBe(before.sessionEpoch)
+    expect(await verifyPassword(after, PASSWORD)).toBe(true)
+  })
+
+  it('refuses to clear: an empty or non-string password is a 400', async () => {
+    // Clearing stops the listener by design, so the card's route does not
+    // expose it; the tool's `set-password` with an empty password still does.
+    const h = start(baseConfig(), { settings: true })
+    await h.run({ command: 'set-password', password: PASSWORD })
+
+    expect((await h.postPassword({ password: '' })).status).toBe(400)
+    expect((await h.postPassword({ password: 42 })).status).toBe(400)
+    expect((await h.postPassword({})).status).toBe(400)
+    expect(await verifyPassword(loadState(), PASSWORD)).toBe(true)
+  })
+
+  it('only answers POST', async () => {
+    const h = start(baseConfig(), { settings: true })
+    expect((await h.getPassword()).status).toBe(405)
+  })
+
+  it('refuses a non-loopback Host, like the config route', async () => {
+    const h = start(baseConfig(), { settings: true })
+    const handler = h.routes.get('/lan-gateway/password')!
+    const outcome = await new Promise<number>((resolve) => {
+      const req = new EventEmitter() as EventEmitter & { method: string; headers: Record<string, string> }
+      req.method = 'POST'
+      req.headers = { host: 'gw.example:3081', origin: 'http://gw.example:3081' }
+      const res = {
+        statusCode: 0,
+        writeHead(status: number) { this.statusCode = status; return this },
+        end() { resolve(this.statusCode) },
+      }
+      void Promise.resolve(handler(req, res)).catch(() => {})
+      queueMicrotask(() => {
+        req.emit('data', Buffer.from(JSON.stringify({ password: PASSWORD })))
+        req.emit('end')
+      })
+    })
+    expect(outcome).toBe(403)
+  })
+
+  it('works with no settings service attached — the credential is not a settings key', async () => {
+    const h = start(baseConfig())
+    const response = await h.postPassword({ password: PASSWORD })
+    expect(response.status).toBe(200)
+    expect(await verifyPassword(loadState(), PASSWORD)).toBe(true)
+  })
+
+  it('reconciles a pending enable intent exactly as the tool does', async () => {
+    const port = await freePort()
+    const h = start(baseConfig({ gatewayPort: port, enabled: true }), { settings: true })
+    expect(await running(h)).toBe(false)
+
+    const response = await h.postPassword({ password: PASSWORD })
+
+    expect(response.status).toBe(200)
+    expect(await running(h)).toBe(true)
   })
 })
 

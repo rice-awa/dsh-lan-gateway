@@ -41,11 +41,25 @@ Do not edit state files by hand — use the `lan_gateway` tool.
 - `lan_gateway` with `command: "set-password"` and `password: "<new pass>"`
   (min 8 chars) — set the login password. Setting it revokes every existing session
   (all sources, LAN included, must sign in again). Pass an empty password to clear —
-  clearing stops the listener (a password is required to run).
+  clearing stops the listener (a password is required to run). The user can also
+  change it themselves from the Plugins card; see below.
 - `lan_gateway` with `command: "rotate-secret"` — invalidate every issued login
   cookie and every live WebSocket (users must sign in again).
 - `lan_gateway` with `command: "tls-regenerate"` — mint a fresh self-signed
   certificate and hot-restart the listener (tlsMode must be `self-signed`).
+
+## The user can change it without the agent
+
+The **Plugins** page's LAN gateway card, on the machine running dsh, carries a
+login-password form. It reports Set / Not set (never the stored password), takes
+the new password twice, and overwrites the old one directly — no old password
+required. Point the user there when they would rather not hand the password to
+the model; use the tool when they ask you to do it.
+
+The card is loopback-only, so a browser reaching dsh through the gateway gets a
+403 for it, and it can only *set* a password: clearing stops the listener, which
+stays a `lan_gateway set-password` command. A change made there behaves exactly
+like the tool's — the session epoch advances and every session is revoked.
 
 ## After enabling
 

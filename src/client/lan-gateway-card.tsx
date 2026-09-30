@@ -20,6 +20,7 @@ import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
 import {
   FIELDS,
+  MIN_PASSWORD_LENGTH,
   TRISTATE_OPTIONS,
   formatValue,
   parseValue,
@@ -52,6 +53,27 @@ interface RouteState {
   port: number
   tls: string
   lastError: string | null
+  /** Whether a login credential exists. Never the credential itself. */
+  passwordSet?: boolean
+}
+
+/** Why a password draft cannot be submitted yet. */
+export type PasswordProblem = 'tooShort' | 'mismatch'
+
+/**
+ * Judge a password draft the way the host's password route will, so a draft the
+ * card enables is never answered with a 400. The length bound is the shared
+ * {@link MIN_PASSWORD_LENGTH}; the confirmation is a UI concern and is checked
+ * here rather than server-side (the host is told one password, and storing only
+ * what was typed twice is the browser's job).
+ * @param password - the new password draft.
+ * @param confirm - the confirmation draft.
+ * @returns the reason it cannot be submitted, or `null` when it can.
+ */
+export function passwordProblem(password: string, confirm: string): PasswordProblem | null {
+  if (password.length < MIN_PASSWORD_LENGTH) return 'tooShort'
+  if (password !== confirm) return 'mismatch'
+  return null
 }
 
 /* ------------------------------------------------------------------ */
@@ -74,6 +96,19 @@ interface Labels {
   stopped: string
   tls: string
   lastError: string
+  passwordSection: string
+  passwordHint: string
+  passwordNew: string
+  passwordConfirm: string
+  passwordSet: string
+  passwordUnset: string
+  passwordRequired: string
+  passwordChange: string
+  passwordChanged: string
+  passwordFailed: string
+  passwordStaleHost: string
+  passwordTooShort: string
+  passwordMismatch: string
   [key: `field.${string}`]: string
   [key: `hint.${string}`]: string
   [key: `opt.${string}`]: string
@@ -96,6 +131,19 @@ const LABELS: Record<'zh' | 'en', Labels> = {
     stopped: '已停止',
     tls: 'TLS',
     lastError: '上次错误',
+    passwordSection: '登录密码',
+    passwordHint: '当前密码不会显示（也读不出来）。输入两次新密码后直接覆盖原密码；改密会递增会话代次，所有已登录会话与已建立的 WebSocket 立即失效。仅在从本机 loopback 打开 dsh web 时可改。',
+    passwordNew: '新密码（至少 8 位）',
+    passwordConfirm: '再次输入新密码',
+    passwordSet: '已设置',
+    passwordUnset: '未设置',
+    passwordRequired: '未设置密码时网关拒绝启动。',
+    passwordChange: '修改密码',
+    passwordChanged: '密码已更新：旧密码立即失效，所有已登录会话已作废。',
+    passwordFailed: '修改密码失败，请重试。',
+    passwordStaleHost: '宿主端没有响应这个接口：可能还没重启 dsh web 加载新版本。重启后再试；重启前仍可用 lan_gateway 工具改密。',
+    passwordTooShort: '密码至少 8 位。',
+    passwordMismatch: '两次输入不一致。',
     'field.enabled': '启用网关',
     'hint.enabled': '启动时监听 0.0.0.0 网关端口',
     'field.gatewayPort': '网关端口',
@@ -146,6 +194,19 @@ const LABELS: Record<'zh' | 'en', Labels> = {
     stopped: 'Stopped',
     tls: 'TLS',
     lastError: 'Last error',
+    passwordSection: 'Login password',
+    passwordHint: 'The current password is never shown (it cannot be read back). Enter a new one twice to overwrite it; changing it advances the session epoch, so every signed-in session and live WebSocket is invalidated at once. Only changeable where dsh web runs on loopback.',
+    passwordNew: 'New password (min 8 chars)',
+    passwordConfirm: 'Repeat new password',
+    passwordSet: 'Set',
+    passwordUnset: 'Not set',
+    passwordRequired: 'The gateway refuses to start without a password.',
+    passwordChange: 'Change password',
+    passwordChanged: 'Password updated: the old one no longer works and every signed-in session was revoked.',
+    passwordFailed: 'The password change failed — retry.',
+    passwordStaleHost: 'The host did not answer this endpoint — it may still be running the previous build. Restart dsh web and retry; the lan_gateway tool can change the password meanwhile.',
+    passwordTooShort: 'At least 8 characters.',
+    passwordMismatch: 'The two entries do not match.',
     'field.enabled': 'Enable gateway',
     'hint.enabled': 'Listen on the gateway port at boot',
     'field.gatewayPort': 'Gateway port',
@@ -218,6 +279,14 @@ export function LanGatewayCard(props: LanGatewayCardProps): ReactNode {
   const [drafts, setDrafts] = useState<Partial<Record<string, string>>>({})
   const [saving, setSaving] = useState(false)
   const [failed, setFailed] = useState<string | null>(null)
+  // The password section is its own submit path: a password is not a settings
+  // key, so it must not ride the config patch (nor light up the card's "未保存"
+  // badge for every keystroke in a password box).
+  const [password, setPasswordDraft] = useState('')
+  const [passwordConfirm, setPasswordConfirmDraft] = useState('')
+  const [passwordBusy, setPasswordBusy] = useState(false)
+  const [passwordError, setPasswordError] = useState<string | null>(null)
+  const [passwordNotice, setPasswordNotice] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -290,6 +359,64 @@ export function LanGatewayCard(props: LanGatewayCardProps): ReactNode {
     })
 
   const dirty = Object.keys(drafts).length > 0
+  const passwordDraftProblem = passwordProblem(password, passwordConfirm)
+  const passwordTyping = password !== '' || passwordConfirm !== ''
+
+  /** Adopt the host's post-write snapshot, keeping the last known values. */
+  const adopt = (body: Partial<RouteState>): void => {
+    if (body.config === undefined) return
+    setRoute({
+      config: body.config,
+      running: body.running ?? false,
+      port: body.port ?? 0,
+      tls: body.tls ?? '',
+      lastError: body.lastError ?? null,
+      passwordSet: body.passwordSet === true,
+    })
+  }
+
+  /**
+   * Overwrite the login password. Deliberately writes only to
+   * `/lan-gateway/password`: the credential is not part of the config patch, so
+   * a change here can never disturb an unsaved settings draft, and the old
+   * password is neither sent nor requested.
+   */
+  const changePassword = async (): Promise<void> => {
+    if (passwordBusy || passwordProblem(password, passwordConfirm) !== null) return
+    setPasswordBusy(true)
+    setPasswordError(null)
+    setPasswordNotice(null)
+    try {
+      const response = await fetch('/lan-gateway/password', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ password }),
+      })
+      // A host that predates this route answers the SPA fallback (HTML, 200),
+      // not a 404 — so "not our JSON" is the signal, and it must not read as a
+      // wrong password or a network failure.
+      const body = await response.json().catch(() => null) as (Partial<RouteState> & { error?: string }) | null
+      if (!response.ok) {
+        setPasswordError(body?.error ?? (response.status === 404 ? t.passwordStaleHost : `HTTP ${response.status}`))
+        return
+      }
+      if (body === null) {
+        setPasswordError(t.passwordStaleHost)
+        return
+      }
+      // Clear the boxes the moment the write lands: the new credential is now
+      // the stored one, and leaving it on screen is the one thing a password
+      // field should not do.
+      setPasswordDraft('')
+      setPasswordConfirmDraft('')
+      setPasswordNotice(t.passwordChanged)
+      adopt(body)
+    } catch {
+      setPasswordError(t.passwordFailed)
+    } finally {
+      setPasswordBusy(false)
+    }
+  }
 
   const save = async (): Promise<void> => {
     if (!dirty || saving || invalid()) return
@@ -318,15 +445,7 @@ export function LanGatewayCard(props: LanGatewayCardProps): ReactNode {
         setFailed(body.error ?? `HTTP ${response.status}`)
         return
       }
-      if (body.config !== undefined) {
-        setRoute({
-          config: body.config,
-          running: body.running ?? false,
-          port: body.port ?? 0,
-          tls: body.tls ?? '',
-          lastError: body.lastError ?? null,
-        })
-      }
+      adopt(body)
       setDrafts({})
     } catch {
       setFailed(t.saveFailed)
@@ -440,6 +559,69 @@ export function LanGatewayCard(props: LanGatewayCardProps): ReactNode {
         ? (
           <div style={styles.body}>
             {route.lastError ? <p style={styles.error} role="status">{t.lastError}: {route.lastError}</p> : null}
+            <div style={styles.section}>
+              <div style={styles.sectionHead}>
+                <span style={styles.label}>{t.passwordSection}</span>
+                <span style={route.passwordSet === true ? styles.badge : styles.badgeAlert}>
+                  {route.passwordSet === true ? t.passwordSet : t.passwordUnset}
+                </span>
+              </div>
+              <p style={styles.hint}>{t.passwordHint}</p>
+              {route.passwordSet === true ? null : <p style={styles.error}>{t.passwordRequired}</p>}
+              <div style={styles.passwordRow}>
+                <input
+                  id="lan-gw-password"
+                  type="password"
+                  autoComplete="new-password"
+                  aria-label={t.passwordNew}
+                  style={passwordInput}
+                  placeholder={t.passwordNew}
+                  value={password}
+                  disabled={passwordBusy}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                    setPasswordDraft(e.target.value)
+                    setPasswordError(null)
+                    setPasswordNotice(null)
+                  }}
+                />
+                <input
+                  id="lan-gw-password-confirm"
+                  type="password"
+                  autoComplete="new-password"
+                  aria-label={t.passwordConfirm}
+                  style={passwordInput}
+                  placeholder={t.passwordConfirm}
+                  value={passwordConfirm}
+                  disabled={passwordBusy}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                    setPasswordConfirmDraft(e.target.value)
+                    setPasswordError(null)
+                    setPasswordNotice(null)
+                  }}
+                />
+              </div>
+              <div style={styles.passwordFoot}>
+                {passwordError !== null
+                  ? <p style={styles.error} role="alert">{passwordError}</p>
+                  : passwordNotice !== null
+                    ? <p style={styles.notice} role="status">{passwordNotice}</p>
+                    : passwordTyping && passwordDraftProblem !== null
+                      ? (
+                        <p style={styles.error} role="status">
+                          {passwordDraftProblem === 'tooShort' ? t.passwordTooShort : t.passwordMismatch}
+                        </p>
+                      )
+                      : null}
+                <button
+                  type="button"
+                  style={styles.save}
+                  disabled={passwordBusy || passwordDraftProblem !== null}
+                  onClick={() => { void changePassword() }}
+                >
+                  {passwordBusy ? t.saving : t.passwordChange}
+                </button>
+              </div>
+            </div>
             {FIELDS.map(def => <div key={def.field}>{renderControl(def)}</div>)}
             <div style={styles.footer}>
               {failed ? <p style={styles.error} role="status">{failed}</p> : null}
@@ -563,6 +745,47 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     flexDirection: 'column',
   },
+  // The password block sits inside the card body, ahead of the config fields:
+  // it is the setting an operator comes here for, and it owns its own submit
+  // button (a password is not part of the settings patch), so it is separated
+  // by a rule rather than merged into the field list.
+  section: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
+    padding: '14px 0',
+    borderBottom: `1px solid ${L.border}`,
+  },
+  sectionHead: { display: 'flex', alignItems: 'center', gap: '8px' },
+  badge: {
+    borderRadius: '999px',
+    padding: '1px 8px',
+    fontSize: '11px',
+    lineHeight: '17px',
+    fontWeight: 500,
+    whiteSpace: 'nowrap',
+    background: L.badgeBg,
+    color: L.labelSecondary,
+  },
+  badgeAlert: {
+    borderRadius: '999px',
+    padding: '1px 8px',
+    fontSize: '11px',
+    lineHeight: '17px',
+    fontWeight: 500,
+    whiteSpace: 'nowrap',
+    background: L.badgeBg,
+    color: L.error,
+  },
+  notice: { flex: 1, minWidth: 0, margin: 0, fontSize: '12px', lineHeight: 1.5, color: L.labelSecondary },
+  passwordRow: { display: 'flex', flexWrap: 'wrap', gap: '8px' },
+  passwordFoot: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: '8px',
+    marginTop: '2px',
+  },
   field: {
     display: 'flex',
     flexDirection: 'column',
@@ -628,3 +851,6 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: 'pointer',
   },
 }
+
+/** The shared input style plus the growth two side-by-side password boxes need. */
+const passwordInput: React.CSSProperties = { ...styles.input, flex: '1 1 160px' }

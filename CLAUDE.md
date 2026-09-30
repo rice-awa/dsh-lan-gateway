@@ -14,7 +14,7 @@ pnpm is the package manager (`packageManager` field, pnpm@11.20.0). Node 22 in C
 pnpm install
 pnpm build        # tsdown: builds BOTH bundles (host lib/index.js + client lib/client.js)
 pnpm typecheck    # two tsconfigs, both must pass
-pnpm test         # vitest run, 190 tests
+pnpm test         # vitest run, 204 tests
 npx vitest run tests/gateway.test.ts   # one file
 npx vitest run -t "rate limit"         # one test by name
 ```
@@ -28,14 +28,14 @@ Local install into a dsh profile uses `pnpm add "link:/path/to/dsh-lan-gateway"`
 Two bundles, one repo.
 
 - **Host** — `src/index.ts` → `lib/index.js` (ESM, node). The cordis plugin.
-- **Client** — `src/client/index.ts` → `lib/client.js` (CJS, browser), wrapped in the `window.__ModuleLoader__.load` closure the dsh web shell expects. It carries two things: an insecure-origin `crypto.randomUUID` shim installed at module scope (before any RPC mints an id, because the gateway can serve plain-HTTP LAN origins where `randomUUID` is absent) and the Plugins page card (the `plugins.item` slot, under the entry id `dsh-lan-gateway`). `PLATFORM_MODULES` in `tsdown.config.ts` are externals resolved from the web shell's frozen module table — never bundle them.
+- **Client** — `src/client/index.ts` → `lib/client.js` (CJS, browser), wrapped in the `window.__ModuleLoader__.load` closure the dsh web shell expects. It carries two things: an insecure-origin `crypto.randomUUID` shim installed at module scope (before any RPC mints an id, because the gateway can serve plain-HTTP LAN origins where `randomUUID` is absent) and the Plugins page card (the `plugins.item` slot, under the entry id `dsh-lan-gateway`), which renders the config fields plus the login-password form. `PLATFORM_MODULES` in `tsdown.config.ts` are externals resolved from the web shell's frozen module table — never bundle them.
 
 Host modules:
 
-- `src/index.ts` — cordis entry (`name` / `inject` / `Config` / `apply`). Owns listener lifecycle, this plugin's own profile entry (the id a dsh ≥ 0.1.7 settings write is addressed by), the loopback-only `/lan-gateway/config` route the settings card reads and writes, and the `GatewayController` behind the `lan_gateway` tool. `gatewayStartProblems` (the fail-closed guard) and `resolveSecureCookies` are exported for direct unit testing.
+- `src/index.ts` — cordis entry (`name` / `inject` / `Config` / `apply`). Owns listener lifecycle, this plugin's own profile entry (the id a dsh ≥ 0.1.7 settings write is addressed by), the loopback-only `/lan-gateway/config` route the settings card reads and writes, the loopback-only `/lan-gateway/password` route it overwrites the credential through (behind the shared `applyPassword`, which the tool's `set-password` also calls), and the `GatewayController` behind the `lan_gateway` tool. `gatewayStartProblems` (the fail-closed guard) and `resolveSecureCookies` are exported for direct unit testing.
 - `src/gateway.ts` — `LanGateway`, the proxy server itself: sockets, lifecycle, the WebSocket splice. Every request *decision* it makes is delegated to `request-policy.ts`.
 - `src/request-policy.ts` — the request-decision seam: `pathOf` / `isOwnedPath`, `isLoopbackHost`, `requiresLogin`, the cookie and same-site gates, and the three header transforms (`upstreamRequestHeaders`, `downstreamResponseHeaders`, `upgradeResponseHeaders`). Pure functions over a literal `RequestHead`, so the decisions are unit-testable without a socket.
-- `src/config-fields.ts` — the one description of the card-driven config fields (`FIELDS` plus the `formatValue` / `parseValue` codecs). Zero-dependency and side-effect-free on purpose: the client bundle imports it for rendering, the host bundle derives `OPTIONAL_CONFIG_KEYS` and `CONFIG_FIELD_KEYS` from it, so "which keys exist" and "which keys clear on empty" have one source.
+- `src/config-fields.ts` — the one description of the card-driven config fields (`FIELDS` plus the `formatValue` / `parseValue` codecs) and of `MIN_PASSWORD_LENGTH`, the bound the password form and the password route share. Zero-dependency and side-effect-free on purpose: the client bundle imports it for rendering, the host bundle derives `OPTIONAL_CONFIG_KEYS` and `CONFIG_FIELD_KEYS` from it, so "which keys exist" and "which keys clear on empty" have one source.
 - `src/auth.ts` — pure primitives with no I/O: `classifySource` + CIDR math, `signCookie` / `verifySession` (HMAC-SHA256 over base64url JSON), `RateLimiter`, `originMatchesHost`.
 - `src/state.ts` — secrets persisted to `~/.dsh/lan-gateway/state.json` (0600, atomic temp+rename).
 - `src/upstream-session.ts` — the shared upstream session relay (launch-token exchange over loopback).
@@ -48,7 +48,7 @@ Host modules:
 Order matters and is enforced before anything is forwarded:
 
 1. `/__login` and `/__logout` — gateway-owned, never relayed.
-2. Owned prefix `/lan-gateway*` → 403, so an unauthenticated remote request cannot reach the loopback-only config route through the Host rewrite.
+2. Owned prefix `/lan-gateway*` → 403, so an unauthenticated remote request cannot reach the loopback-only config or password route through the Host rewrite.
 3. Session gate: `requiresLogin(source) && !authorized` → 302 to `/__login`.
 4. Same-site / Origin fence — applied *before* the rewrite, because rewriting Origin back to loopback blinds dsh's own CSRF defence. The login POST carries its own, looser fence (`loginOriginAllowed`): it must admit an Origin-less curl/CLI post, which `sameSiteAllowed` would refuse.
 5. Relay to `127.0.0.1:<dshPort>`.
@@ -58,7 +58,7 @@ WebSocket upgrades run the same gates through `handleUpgrade`, and each upgraded
 ### Invariants that span files
 
 - **Path decisions use `pathOf`, forwarding uses the raw `req.url`.** `pathOf` applies WHATWG normalization (dot-segment collapsing) and strips trailing slashes, matching how dsh's router resolves the request. Any new owned-path or route test must go through `pathOf`; a raw-string prefix test disagrees with dsh on `/foo/../lan-gateway/config`.
-- **Config vs state.** Everything in `Config` is safe to appear in `--dump-config`; the cookie-signing secret and scrypt password hash live only in `state.json`. Never move a secret into the schema.
+- **Config vs state.** Everything in `Config` is safe to appear in `--dump-config`; the cookie-signing secret and scrypt password hash live only in `state.json`. Never move a secret into the schema — which is why the card changes the password over its own `/lan-gateway/password` route (same loopback/same-origin fence as the config route, set-only: clearing stops the listener and stays a tool command) instead of adding a settings key, and why the snapshot answers `passwordSet` as a boolean and never the hash, the salt, or the length.
 - **Default-deny.** Source classification grants nothing by itself. `lanPasswordless` is an explicit opt-in and is refused unless the base has browser-session auth (detected by the `connection` service attaching) — a "trust my LAN" choice must never reinstall the original Host-trust hole.
 - **The relay owns the `dsh-auth-*` cookie namespace** in both directions: stripped from the client's `Cookie` before forwarding (a stale client cookie would otherwise shadow the relay's on every request) and stripped from upstream `Set-Cookie` before returning (upstream's only cookie-minting route is the launch-token exchange).
 - **`listenerKey()` gates restarts.** A config field that changes listener behavior must be added to `listenerKey`, or a live settings change silently keeps serving the old listener. The relay-availability flag is part of the key on purpose.
@@ -81,8 +81,8 @@ Touches, at minimum: the `Config` interface, the `z.object` schema and the `read
 - `tests/integration/gateway.test.ts` — real sockets against an in-process fake upstream. Source class is posed through the injectable `classifySource` on `GatewayConfig` rather than by binding other addresses.
 - `tests/upstream-session.test.ts` — real loopback token exchange against an in-process minter.
 - `tests/request-policy.test.ts` — the decision seam, against literal `RequestHead` objects: path normalization, owned prefix, same-site and login fences, and both directions of the header transforms.
-- `tests/settings-card.test.ts` — the card's tri-state field codec, plus the slot-registration contract: the card registers into `plugins.item` under `dsh-lan-gateway`, carries a label thunk, and withdraws once the Host stops serving the entry.
-- `tests/integration/management-plane.test.ts` — a fake cordis context running the real `apply()` with a stand-in for the 0.1.7 settings service, so the `lan_gateway` tool and the card's config route are exercised against one shared state. The fake exposes the 0.1.7 surface and deliberately *not* `register`, and it reflects a write into the volatile config references the way the Loader does — so a plugin that still calls the removed API fails here. `HOME` *and* `USERPROFILE` are redirected to a temp dir, because Windows answers `os.homedir()` from the latter; `state.ts` and `tls.ts` both resolve `homedir()` at call time, so the plugin's real files are never touched.
+- `tests/settings-card.test.ts` — the card's tri-state field codec, the password draft gate (`passwordProblem`: the shared length bound first, then the confirmation), plus the slot-registration contract: the card registers into `plugins.item` under `dsh-lan-gateway`, carries a label thunk, and withdraws once the Host stops serving the entry.
+- `tests/integration/management-plane.test.ts` — a fake cordis context running the real `apply()` with a stand-in for the 0.1.7 settings service, so the `lan_gateway` tool and the card's config **and password** routes are exercised against one shared state. The password tests read the real `state.json` in the redirected home (`loadState` + `verifyPassword`), so "the old password stopped working", "the epoch advanced", and "no hash, salt, or plaintext came back over the wire" are asserted against the credential itself rather than the route's own summary. The fake exposes the 0.1.7 surface and deliberately *not* `register`, and it reflects a write into the volatile config references the way the Loader does — so a plugin that still calls the removed API fails here. `HOME` *and* `USERPROFILE` are redirected to a temp dir, because Windows answers `os.homedir()` from the latter; `state.ts` and `tls.ts` both resolve `homedir()` at call time, so the plugin's real files are never touched.
 - `tests/integration/session-races.test.ts` — the races the audit named: a credential change landing mid-sign-in (D9) or mid-handshake (D10), and an upstream that answers a WebSocket upgrade with a non-101 (D12). `verifyPassword` is partially mocked to a hand-settled promise, because scrypt resolves too fast for the window to be observable otherwise.
 - `tsconfig.json` excludes `src/client` and the two client tests; `tsconfig.client.json` (dom + `jsx: react-jsx`) includes exactly those. `pnpm typecheck` runs both, so a client-only change still needs the second config.
 

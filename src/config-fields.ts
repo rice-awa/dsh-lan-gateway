@@ -9,6 +9,11 @@
  * side and unknown on the other, which is what let the card silently rewrite
  * keys it never showed.
  *
+ * It also carries `MIN_PASSWORD_LENGTH`: the login password is deliberately not
+ * a field here (it is a secret in `state.json`, not a settings key), but its
+ * length bound is a contract the card's form and the host's password route
+ * must not disagree about.
+ *
  * Because both halves import it, this module must stay dependency-free and
  * side-effect-free: no schemastery (the host schema remains the validating
  * authority, not this table), no node built-ins, no DOM, no I/O.
@@ -42,6 +47,14 @@ export interface LanGatewaySettings {
 
 /** A settings key this table knows how to edit. */
 export type ConfigFieldKey = keyof LanGatewaySettings
+
+/**
+ * Minimum login-password length, in characters. The credential is not a config
+ * field (it lives in `state.json`, never in the schema), but the bound belongs
+ * here all the same: the card's password form and the host's password route
+ * both read it, so a draft the card accepts is never answered with a 400.
+ */
+export const MIN_PASSWORD_LENGTH = 8
 
 /** How a field is rendered and parsed. */
 export type FieldKind = 'boolean' | 'number' | 'text' | 'cidrs' | 'select' | 'tristate'
