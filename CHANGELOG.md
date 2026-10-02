@@ -1,5 +1,15 @@
 # 更新日志
 
+## 0.7.1
+
+桌面版里保存网关配置不再被自己的围栏拒之门外。桌面应用的界面不是从 `http://127.0.0.1:<port>` 提供，而是从自定义来源 **`dsh-app://app`** 提供，每个非静态路径都走一条桥（`@deepseek-ai/dsh-desktop-host` 的 `forwardWebRequest`）转发到回环主机，转发时**删掉 `host` / `origin` / `cookie` / `sec-fetch-site`**，只补回 dsh 自己的宿主会话 Cookie。于是桌面卡片**读**配置（GET，本就不带 Origin）一切正常，而**保存**（POST）到达 `/lan-gateway/config` 时既没有 Origin、方法又不是只读——`isTrustedConfigRequest` 里那条「写操作必须带 Origin」把每一次保存都判成 403，界面上就是卡片自带的错误行原文 `request refused: this route answers same-origin loopback requests only`；改密路由共用同一道围栏，症状一模一样。这是一个「能读、不能写」的死卡片，而且只发生在宿主机用户自己身上。
+
+**围栏改为与 dsh 对齐。** dsh 面对同一个桥用的规则是 `isTrustedApiRequest`（`@deepseek-ai/dsh-host-webserver`）：Host 必须是回环或受信权威、`sec-fetch-site: cross-site` 直接拒、**Origin 存在时才比较它与 Host**。本插件的围栏此前比它更严——严到把桌面版用户挡在门外。现在同样是三条：Host 回环、拒绝跨站、带 Origin 时必须与 Host 匹配；Origin 缺失则放行。
+
+**安全上没有让步。** 本机非浏览器客户端本来就能同时自设 Host 与 Origin（`curl -H 'Origin: http://127.0.0.1:<port>'`），那条规则从未拦住它；而浏览器侧的防线仍在——跨站页面要么带 `sec-fetch-site: cross-site`，要么带一个不指向本 Host 的 Origin（跨源重定向与 sandbox 帧留下的是字面量 `null`，同样不匹配），两者依旧 403。逐网关那条路径完全不变：网关对 `/lan-gateway*` 前缀的 403、以及对宿主机本机浏览器（回环来源 + 回环权威）的放行都照旧。0.5.5 的 QVD 加固把「写操作必须带 Origin」写进了验收表第 10 行，当时唯一的写入方还是普通浏览器；桌面桥的出现让该行不再成立，`docs/security/qvd-2026-57410-fix-plan.md` 里已就地标注。
+
+**测试面。** `tests/start-guard.test.ts` 第 10 行改成**相反**的断言（桌面桥形状：回环 Host + POST 无 Origin → 放行），并补两条：无 Origin 的写操作在非回环 Host、或自称 `sec-fetch-site: cross-site` 时仍拒；`dsh-app://app`、`null`、端口不符的 Origin（写操作）仍拒。`tests/integration/management-plane.test.ts` 新增 2 项，用真实 `apply()` 的配置路由与改密路由各跑一次「桌面桥形状」的保存。测试总数 215 → 219。
+
 ## 0.7.0
 
 宿主机上经网关访问时，**插件卡片不再是死的**。此前 `/lan-gateway/*`（配置路由与改密路由）由网关一律 403、绝不转发，设计前提是「管理面只能从原生 loopback 监听器进」。这在实践里制造了一个陷阱：宿主机用户自己的日常入口就是网关地址（`https://127.0.0.1:3081`），打开 Plugins 页看到的是一张「无法读取网关配置 · 远程请改用 lan_gateway 工具」的卡片——文案还说你是远程，而你就在本机。

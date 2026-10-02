@@ -116,11 +116,12 @@
 
 **两选项都需做的收紧（原生配置路由，`src/index.ts:208-226`）：**
 - 状态改变（POST）必须携带 Origin 且 `origin.host === host`；Origin 缺失 → 拒绝（现状 `origin === undefined → true` 是 F2 的漏洞点，删掉）。
+  - **0.7.1 起改为「Origin 存在时才比较」**（与 dsh 自己的 `isTrustedApiRequest` 一致）：桌面版把界面挂在 `dsh-app://app` 来源上，其转发桥（`dsh-desktop-host` 的 `forwardWebRequest`）会删掉 `origin` / `sec-fetch-site` 再打回回环，于是「写操作必须带 Origin」让桌面卡片每次保存都 403（能读不能写）。F2 的本体——**经网关**把远端未认证请求改写成回环 Host 后触达该路由——由网关对 `/lan-gateway*` 前缀的 403（本文件第 6 节）与实际回环绑定承担，不受此条影响；本机非浏览器客户端本就能自设 Origin，该条从未拦住它。
 - 保留回环 Host 要求（它同时挡掉 DNS rebinding：域名无法以字面回环主机名通过）。
 - `sec-fetch-site: cross-site` 拒绝（保留）。
 - 体积/频率限制沿用 `readBody(req, 64*1024, res)`（已 64KiB）。
 
-**验收：** 经网关请求 `/lan-gateway/config` → 网关直接 403，不触达上游；原生路由 POST 无 Origin/跨站 Origin → 403；GET 同源（卡片正常路径）→ 200；设置服务可用时，卡片保存仍工作。
+**验收：** 经网关请求 `/lan-gateway/config` → 网关直接 403，不触达上游；原生路由 POST 无 Origin/跨站 Origin → 403（前半条 0.7.1 起改为放行，见上）；GET 同源（卡片正常路径）→ 200；设置服务可用时，卡片保存仍工作（含桌面版）。
 
 ## 7. 阶段 4 —— HTTP/WS 统一鉴权与路径处理（F3）
 
@@ -194,7 +195,7 @@
 | 7 | LAN，同跨站头，WS upgrade | 拒绝（upgrade 不再绕行） |
 | 8 | 带点段的 API 路径，无会话 | 302/403（默认全鉴权，无前缀漏洞） |
 | 9 | 经网关请求 `/lan-gateway/config` | 网关 403，不触达上游 |
-| 10 | 原生配置路由，回环 Host + POST 无 Origin | 403 |
+| 10 | 原生配置路由，回环 Host + POST 无 Origin | 403 **（0.7.1 起改为 200：桌面版转发桥会剥掉 Origin，见 6 节；跨站标记与不匹配的 Origin 仍 403）** |
 | 11 | 原生配置路由，同源 GET（卡片路径） | 200 |
 | 12 | 正确登录 + Cookie（加密入口） | 302 + 200；Cookie `Secure; HttpOnly; SameSite=Strict` |
 | 13 | 改密/清密后旧 Cookie | 立即失效；清密后监听停止 |

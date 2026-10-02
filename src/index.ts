@@ -61,10 +61,7 @@ import {
 } from './config-fields.ts'
 import { LanGateway } from './gateway.ts'
 import { readBody } from './login.ts'
-import {
-  isLoopbackHost,
-  READ_ONLY_METHODS,
-} from './request-policy.ts'
+import { isLoopbackHost } from './request-policy.ts'
 import {
   loadState,
   saveState,
@@ -451,8 +448,24 @@ function tlsStatusLine(cfg: Config): string {
  * gateway refuses to relay this prefix, so the only way in is the native
  * loopback listener itself (a genuine local user, or a local process that could
  * already read `~/.dsh`). Host must be loopback (also blocks DNS rebinding),
- * cross-site fetches are refused, an Origin must match the Host the browser
- * used, and a state-changing method must carry that Origin. Exported for tests.
+ * cross-site fetches are refused, and an Origin that *is* attached must match
+ * the Host this request named. These are exactly dsh's own rules for a request
+ * that may reach its API (`isTrustedApiRequest`), Origin-optional included.
+ *
+ * **Why an absent Origin is accepted, on a write too.** The Desktop app answers
+ * its UI from the `dsh-app://app` origin and forwards every non-asset path to
+ * this loopback server through a bridge that strips `host`/`origin`/`cookie`/
+ * `sec-fetch-site` and re-attaches dsh's own host session cookie
+ * (`forwardWebRequest` in `@deepseek-ai/dsh-desktop-host`). A read from that
+ * bridge was always fine; demanding an Origin on a state change made every save
+ * from the Desktop card a 403 — the one place a local operator goes looking for
+ * this setting — while dsh's own routes accept the shape. Nothing is given up:
+ * a non-browser client on this host sets Host *and* Origin freely, so that rule
+ * never fenced it, and a browser cannot suppress the markers that do the work —
+ * a cross-site request carries `sec-fetch-site: cross-site`, or an Origin that
+ * does not name this Host (a cross-origin redirect or a sandboxed frame makes
+ * it the literal `null`, which fails the match just as well), and both stay
+ * refused. Exported for tests.
  */
 export function isTrustedConfigRequest(req: IncomingMessage): boolean {
   const host = req.headers?.host
@@ -467,8 +480,6 @@ export function isTrustedConfigRequest(req: IncomingMessage): boolean {
   if (req.headers?.['sec-fetch-site'] === 'cross-site') return false
   const origin = req.headers?.origin
   if (origin !== undefined && !originMatchesHost(origin, host)) return false
-  const method = req.method ?? 'GET'
-  if (!READ_ONLY_METHODS.has(method) && origin === undefined) return false
   return true
 }
 

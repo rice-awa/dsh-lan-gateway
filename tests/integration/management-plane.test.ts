@@ -123,8 +123,12 @@ interface Harness {
   run: (args: Record<string, unknown>) => Promise<{ ok: boolean; message: string }>
   /** POST a config patch through the plugin's own route. */
   post: (body: unknown) => Promise<{ status: number; body: Record<string, unknown> }>
+  /** POST a config patch exactly as the Desktop shell's bridge forwards it: loopback Host, no Origin. */
+  postAsDesktopShell: (body: unknown) => Promise<{ status: number; body: Record<string, unknown> }>
   /** POST a password change through the card's password route. */
   postPassword: (body: unknown) => Promise<{ status: number; body: Record<string, unknown> }>
+  /** POST a password change exactly as the Desktop shell's bridge forwards it. */
+  postPasswordAsDesktopShell: (body: unknown) => Promise<{ status: number; body: Record<string, unknown> }>
   /** GET the password route (which only accepts a POST). */
   getPassword: () => Promise<{ status: number; body: Record<string, unknown> }>
   /** GET the route snapshot. */
@@ -233,13 +237,15 @@ function harness(
     method: string,
     body?: unknown,
     path = '/lan-gateway/config',
+    withOrigin = true,
   ): Promise<{ status: number; body: Record<string, unknown> }> => {
     const req = new EventEmitter() as EventEmitter & { method: string; headers: Record<string, string>; url: string }
     req.method = method
     req.url = path
-    // A loopback Host with a matching Origin: the route's own fence, satisfied.
+    // A loopback Host, with a matching Origin unless the caller is posing as the
+    // Desktop shell's bridge (which strips both Origin and Sec-Fetch-Site).
     req.headers = { host: `127.0.0.1:${DSH_PORT}` }
-    if (body !== undefined) req.headers['origin'] = `http://127.0.0.1:${DSH_PORT}`
+    if (body !== undefined && withOrigin) req.headers['origin'] = `http://127.0.0.1:${DSH_PORT}`
 
     const done = new Promise<{ status: number; body: Record<string, unknown> }>((resolve) => {
       const res = {
@@ -277,7 +283,9 @@ function harness(
       return result as { ok: boolean; message: string }
     },
     post: body => callRoute('POST', body),
+    postAsDesktopShell: body => callRoute('POST', body, '/lan-gateway/config', false),
     postPassword: body => callRoute('POST', body, '/lan-gateway/password'),
+    postPasswordAsDesktopShell: body => callRoute('POST', body, '/lan-gateway/password', false),
     getPassword: () => callRoute('GET', undefined, '/lan-gateway/password'),
     get: () => callRoute('GET'),
     async dispose() {
@@ -413,6 +421,21 @@ describe('the Settings card save path', () => {
     expect(h.provider.storedSection(ENTRY_ID)).toEqual({ enabled: false, gatewayPort: 3099 })
   })
 
+  it('saves the same patch when the Desktop shell bridge forwards it with no Origin', async () => {
+    // The Desktop app's `dsh-app://app` bridge deletes Origin and Sec-Fetch-Site
+    // and keeps only dsh's host cookie, so this is what a Plugins-card save from
+    // the Desktop app looks like. 0.7.0 refused it — "request refused: this route
+    // answers same-origin loopback requests only" — while the read that renders
+    // the card had passed, leaving a card that displays fields it cannot save.
+    const h = start(baseConfig(), { settings: true })
+
+    const response = await h.postAsDesktopShell({ gatewayPort: 3099 })
+
+    expect(response.status).toBe(200)
+    expect(h.provider.storedSection(ENTRY_ID)).toEqual({ gatewayPort: 3099 })
+    expect(await currentConfig(h)).toMatchObject({ gatewayPort: 3099 })
+  })
+
   it('refuses a cross-site save from a non-loopback Host', async () => {
     const h = start(baseConfig(), { settings: true })
     const handler = h.routes.get('/lan-gateway/config')!
@@ -502,6 +525,13 @@ describe('the Settings card password route', () => {
     expect((await h.postPassword({ password: '' })).status).toBe(400)
     expect((await h.postPassword({ password: 42 })).status).toBe(400)
     expect((await h.postPassword({})).status).toBe(400)
+    expect(await verifyPassword(loadState(), PASSWORD)).toBe(true)
+  })
+
+  it('accepts the Desktop shell bridge shape here too — the fence is shared', async () => {
+    const h = start(baseConfig(), { settings: true })
+    const response = await h.postPasswordAsDesktopShell({ password: PASSWORD })
+    expect(response.status).toBe(200)
     expect(await verifyPassword(loadState(), PASSWORD)).toBe(true)
   })
 

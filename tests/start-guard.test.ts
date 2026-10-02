@@ -3,7 +3,9 @@
  * but need no live sockets: `gatewayStartProblems` (which configs the listener
  * refuses to run under) and `isTrustedConfigRequest` (the loopback fence in
  * front of the native `/lan-gateway/config` route). Covers acceptance rows 5,
- * 10, 11 and 14 of the QVD-2026-57410 fix plan.
+ * 11 and 14 of the QVD-2026-57410 fix plan; row 10 ("a loopback Host with a
+ * state-changing POST and no Origin is refused") was tightened past dsh's own
+ * rule and is now deliberately the opposite — see `isTrustedConfigRequest`.
  *
  * @module tests/start-guard
  */
@@ -88,12 +90,32 @@ describe('isTrustedConfigRequest (loopback config-route fence)', () => {
     expect(isTrustedConfigRequest(fakeReq({ host: 'localhost:3080', origin: 'http://localhost:3080' }))).toBe(true)
   })
 
-  it('row 10: a state-changing POST without an Origin is refused', () => {
-    expect(isTrustedConfigRequest(fakeReq({ host: '127.0.0.1:3080' }, 'POST'))).toBe(false)
+  it('row 10: a state-changing POST from the Desktop shell — loopback Host, no Origin — passes', () => {
+    // The Desktop app serves its UI from `dsh-app://app` and forwards API calls
+    // through a bridge that deletes Origin and Sec-Fetch-Site, so a card save
+    // arrives exactly like this. Demanding an Origin refused every Desktop save
+    // (0.7.0) even though dsh's own route rule accepts the shape.
+    expect(isTrustedConfigRequest(fakeReq({ host: '127.0.0.1:3080' }, 'POST'))).toBe(true)
+    expect(isTrustedConfigRequest(fakeReq({ host: 'localhost:3080' }, 'POST'))).toBe(true)
   })
 
   it('accepts a state-changing POST with a matching Origin', () => {
     expect(isTrustedConfigRequest(fakeReq({ host: '127.0.0.1:3080', origin: 'http://127.0.0.1:3080' }, 'POST'))).toBe(true)
+  })
+
+  it('still refuses an Origin-less write that is not on a loopback Host or claims a cross-site fetch', () => {
+    expect(isTrustedConfigRequest(fakeReq({ host: '192.168.1.5:3081' }, 'POST'))).toBe(false)
+    expect(isTrustedConfigRequest(fakeReq({ host: 'myhost.example:3081' }, 'POST'))).toBe(false)
+    expect(isTrustedConfigRequest(fakeReq({ host: '127.0.0.1:3080', 'sec-fetch-site': 'cross-site' }, 'POST'))).toBe(false)
+  })
+
+  it('refuses a write from any other origin the shell could name', () => {
+    // The bridge strips this header before it reaches the route; a request that
+    // still names it is not the Desktop shell, and `null` is what a cross-origin
+    // redirect or a sandboxed frame leaves behind.
+    expect(isTrustedConfigRequest(fakeReq({ host: '127.0.0.1:3080', origin: 'dsh-app://app' }, 'POST'))).toBe(false)
+    expect(isTrustedConfigRequest(fakeReq({ host: '127.0.0.1:3080', origin: 'null' }, 'POST'))).toBe(false)
+    expect(isTrustedConfigRequest(fakeReq({ host: '127.0.0.1:3080', origin: 'http://127.0.0.1:9999' }, 'POST'))).toBe(false)
   })
 
   it('refuses a non-loopback Host (public IP / LAN address)', () => {

@@ -14,7 +14,7 @@ pnpm is the package manager (`packageManager` field, pnpm@11.20.0). Node 22 in C
 pnpm install
 pnpm build        # tsdown: builds BOTH bundles (host lib/index.js + client lib/client.js)
 pnpm typecheck    # two tsconfigs, both must pass
-pnpm test         # vitest run, 215 tests
+pnpm test         # vitest run, 219 tests
 npx vitest run tests/gateway.test.ts   # one file
 npx vitest run -t "rate limit"         # one test by name
 ```
