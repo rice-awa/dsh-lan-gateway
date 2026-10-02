@@ -407,6 +407,87 @@ describe('LanGateway end-to-end against a fake upstream', () => {
     }
   })
 
+  it('row 9e: a host-local browser (loopback source + loopback authority) relays the owned prefix', async () => {
+    const upstream = await createUpstream()
+    const { gateway, port } = await startGateway(await authedState(), upstream, { source: 'loopback' })
+    try {
+      const issued = await login(port, 'correct horse battery')
+      const jar = cookieJar(issued.headers)
+
+      // The settings card on the gateway origin: the gateway refuses the prefix
+      // for everyone but the host itself, and this request is the host itself.
+      const res = await req(port, 'GET', '/lan-gateway/config', { cookie: jar })
+      expect(res.status).toBe(200)
+      expect(upstream.seen).toHaveLength(1)
+      expect(upstream.seen[0]!.url).toBe('/lan-gateway/config')
+      // Rewritten exactly like any other relayed request, so the plugin's own
+      // loopback-Host fence accepts it as it does on the native listener.
+      expect(upstream.seen[0]!.headers.host).toBe(`127.0.0.1:${upstream.port}`)
+    } finally {
+      await gateway.close()
+      await upstream.close()
+    }
+  })
+
+  it('row 9f: the host-local exemption is still behind the session gate', async () => {
+    const upstream = await createUpstream()
+    const { gateway, port } = await startGateway(await authedState(), upstream, { source: 'loopback' })
+    try {
+      // No session: the login gate answers first, so the exemption is not a way
+      // around authenticating even for a loopback source.
+      const res = await req(port, 'GET', '/lan-gateway/config')
+      expect(res.status).toBe(302)
+      expect(res.headers.location).toBe('/__login')
+      expect(upstream.seen).toHaveLength(0)
+    } finally {
+      await gateway.close()
+      await upstream.close()
+    }
+  })
+
+  it('row 9g: a loopback socket that named a non-loopback authority is refused', async () => {
+    const upstream = await createUpstream()
+    const { gateway, port } = await startGateway(await authedState(), upstream, { source: 'loopback' })
+    try {
+      const issued = await login(port, 'correct horse battery')
+      const jar = cookieJar(issued.headers)
+
+      // A trusted TLS terminator deployment: the socket source is the
+      // terminator's own loopback address for every remote browser, so the
+      // source test alone would readmit all of them. The authority the browser
+      // dialed is the public host, and that is what refuses it.
+      const res = await req(port, 'GET', '/lan-gateway/config', {
+        cookie: jar,
+        extra: { host: 'gw.example.com' },
+      })
+      expect(res.status).toBe(403)
+      expect(res.body).toContain('forbidden')
+      expect(upstream.seen).toHaveLength(0)
+    } finally {
+      await gateway.close()
+      await upstream.close()
+    }
+  })
+
+  it('row 9h: an upgrade to the owned prefix stays refused even from the host', async () => {
+    const upstream = await createUpstream()
+    const { gateway, port } = await startGateway(await authedState(), upstream, { source: 'loopback' })
+    try {
+      const issued = await login(port, 'correct horse battery')
+      const jar = cookieJar(issued.headers)
+      // No route under the prefix is an upgrade target, host-local or not.
+      const upgraded = await rawUpgrade(port, '/lan-gateway/config', {
+        Cookie: jar,
+        Origin: `http://127.0.0.1:${port}`,
+      })
+      expect(upgraded).toMatch(/^HTTP\/1\.1 403 /)
+      expect(upstream.seen).toHaveLength(0)
+    } finally {
+      await gateway.close()
+      await upstream.close()
+    }
+  })
+
   it('signing out revokes the session that signed out, and only that one', async () => {
     const upstream = await createUpstream()
     const { gateway, port } = await startGateway(await authedState(), upstream, { source: 'internet' })

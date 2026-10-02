@@ -2,18 +2,21 @@ import type { UserConfig } from 'tsdown'
 
 const PLUGIN_ID = '@riceawa/dsh-lan-gateway'
 
-/** Module specifiers the dsh web shell shares into its frozen module table. */
+/**
+ * Module specifiers the dsh web shell shares into its frozen module table
+ * (dsh 0.2's `PLATFORM_MODULES`: React, Cordis, and the static UI libraries).
+ * The browser half only ever requires `react`/`react/jsx-runtime`; the rest are
+ * listed so a future value import from them stays external instead of being
+ * bundled into the plugin.
+ */
 const PLATFORM_MODULES = [
   'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client', '@deepseek-ai/cordis',
   '@deepseek-ai/dsh-client-ui-slots',
-  '@deepseek-ai/dsh-client-web-react',
   '@deepseek-ai/dsh-client-ui-primitives',
-  '@deepseek-ai/dsh-client-ui-attachment',
-  '@deepseek-ai/dsh-client-schema-form',
 ] as const
 
 /** Externals resolved from the loader module table. */
-const CLIENT_EXTERNALS: readonly string[] = [...PLATFORM_MODULES, '@deepseek-ai/dsh-client-runtime/client']
+const CLIENT_EXTERNALS: readonly string[] = [...PLATFORM_MODULES]
 
 export default [
   {

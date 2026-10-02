@@ -1,5 +1,21 @@
 # 更新日志
 
+## 0.7.0
+
+宿主机上经网关访问时，**插件卡片不再是死的**。此前 `/lan-gateway/*`（配置路由与改密路由）由网关一律 403、绝不转发，设计前提是「管理面只能从原生 loopback 监听器进」。这在实践里制造了一个陷阱：宿主机用户自己的日常入口就是网关地址（`https://127.0.0.1:3081`），打开 Plugins 页看到的是一张「无法读取网关配置 · 远程请改用 lan_gateway 工具」的卡片——文案还说你是远程，而你就在本机。
+
+**放行的条件是两个，缺一不可**：TCP 来源为 loopback **且** 浏览器地址栏写的是回环权威（`127.0.0.1` / `localhost` / `::1`）。来源那一项是远程客户端伪造不了的；地址那一项则挡住受信 TLS 终止代理的部署——那里所有请求的 TCP 来源都是代理自己的回环地址（来源分级只认 `socket.remoteAddress`，不信任 `X-Forwarded-For`），只看来源等于对所有远程浏览器重新开门，而它们报的 Host 是公网域名/IP，因此仍被拒。放行的请求照样要过网关会话门与 CSRF 围栏，再以改写后的 loopback Host 交给插件自己的回环同源围栏——也就是原生卡片走的同一条路。**WebSocket 升级不在放行之列**，该前缀下没有任何路由是升级目标，依旧一律拒。远程（LAN / 公网 / 反代之后）与宿主机的局域网 IP、域名入口行为完全不变：403，管理走 `lan_gateway` 工具。
+
+**卡片文案分流。** 读配置失败时不再笼统地说「远程请改用工具」：网关对该前缀的拒绝是固定的 `403` + `forbidden`，卡片据此区分「网关拒绝了你（你不在宿主机回环上）」与「这个接口根本读不到」，前者给出可执行的指引（用 `127.0.0.1` 或 `localhost` 在宿主机上打开本页，或用工具），不再对坐在宿主机上的用户说他是远程。
+
+**配置页从「官方插件位」搬到本插件自己的配置槽（适配 dsh 0.2）。** 此前卡片注册进 Plugins 页的 `plugins.item` 列表槽——dsh 明说那个槽是**官方**设置页占用的（一个 host-plane 命名空间配一个 companion 包），bundle 自己的配置该去 `plugins.bundle.config` / `plugins.row.config`。于是它被列进「官方」分组，看起来像个官方插件。现在按包名 `@riceawa/dsh-lan-gateway` 注册进 **`plugins.bundle.config`**（dsh-mnemon、dshmarket 用的同一套机制），配置就渲染在本插件自己的页面上，标题、图标、面包屑由 Plugins 页绘制。该槽只渲染 `view: 'page'`，卡片随之变成纯页面主体：去掉自绘的折叠标题栏与单行摘要（`summary` 返回 `null`），顶部改成监听状态 + 「未保存」标记；密码栏、字段表、保存/放弃、读不到配置时的两种文案分流都照旧。写路径不变——`plugins.bundle.config` 的 owner props **根本不带** host 的 `ConfigPageForm`（只有 `plugins.row.config` 的页面会拿到 `form.state` / `form.mutate`），所以卡片继续走自己的 loopback 路由，管理面依旧只在宿主机回环上可写。
+
+**客户端入口适配 dsh 0.2 的模块契约。** `@deepseek-ai/dsh-client-runtime` 这个包 0.2 已从底座里消失（npm 也止步 0.1.1-rc.2），`ClientContext` 不复存在——浏览器插件的 `apply(ctx)` 现在收的是 cordis 的 `Context`（`import type { Context } from '@deepseek-ai/cordis'`）。`ctx.slots` 的服务声明改由 `@deepseek-ai/dsh-client-ui-renderer/client` 提供（0.2 里 renderer 才是安装槽注册表的那一方），因此 typecheck 的 devDeps 一并抬到 **0.2.0-rc.2**（与桌面版 nightly 实际内置版本一致），并补上 renderer 类型。`package.json` 的 `dsh.client.inject: ["@deepseek-ai/dsh-client-runtime"]` 一并删掉：那是**包行**级联列表而非 cordis 服务表，该名字在 0.2 的 boot graph 里已无对应行（缺失只会被静默跳过），留着是死引用；`tsdown.config.ts` 的 `PLATFORM_MODULES` 也据 0.2 的真实 seed 表（React、cordis、`dsh-client-store`、`dsh-client-ui-slots`、`dsh-client-ui-primitives`、`dsh-client-ui-dockkit`）清掉了 `dsh-client-web-react`、`dsh-client-schema-form`、`dsh-client-runtime/client` 三个不存在或已消失的名字。卡片前端仍只需 `react` / `react/jsx-runtime` 两个 seed，`immediately: true` 保留（模块副作用要抢在任何 RPC 生成 id 之前跑，UUID shim 靠它）。
+
+**测试面。** 注册契约那组测试改写为：槽名必须是 `plugins.bundle.config`、`key` 必须是包名 `@riceawa/dsh-lan-gateway`、`label` thunk 随 `plugins.item` 一起退场、Host 不再 served 时撤销注册——把「又挂回官方插件位」钉成测试失败。测试总数 216 → 215（删掉 label thunk 一项）。
+
+**测试面。** `tests/request-policy.test.ts` 新增 4 项覆盖新的 `isLoopbackAuthority`（端口有无、IPv6 拼写、公网与畸形权威一律拒、以及 `evil.com@127.0.0.1` 这类「URL 能解析出回环主机名但其实不是纯权威」的写法）；`tests/integration/gateway.test.ts` 新增 4 项：本机浏览器放行并确认 Host 被改写、放行仍受会话门约束（无 cookie → 302）、loopback 来源但 Host 为公网域名仍 403、本机来源的升级请求仍 403；`tests/settings-card.test.ts` 新增 2 项覆盖「网关自己拒绝」的判定。测试总数 206 → 216。
+
 ## 0.6.2
 
 修正 0.6.1 卡片上的密码状态徽标：**缺字段不再当成「未设置」**。0.6.1 发布后当场复现了一个版本错配场景——页面刷新后浏览器拿到新卡片，而正在运行的 dsh web 仍是旧宿主（本机实测：宿主进程 19:15 启动，新 bundle 21:32 落盘），旧宿主的快照里根本没有 `passwordSet` 字段，卡片把它读成 `false`，于是对一个正在运行、且按守卫必然已设密码的网关显示「未设置」并附上「未设置密码时网关拒绝启动」的红色告警。现在徽标是三态：`true` = 已设置、`false` = 未设置（红色告警）、**字段缺失 = 状态未知**，并提示「宿主端没有报告密码状态，重启 dsh web 后生效」，提交路径也早已对同一错配给出明确文案。`passwordStatus()` 是这条判定的纯函数，测试从 204 → 206。

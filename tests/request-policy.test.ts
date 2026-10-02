@@ -9,6 +9,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   isCrossSiteRequest,
+  isLoopbackAuthority,
   isLoopbackHost,
   isOwnedPath,
   loginOriginAllowed,
@@ -78,6 +79,39 @@ describe('isLoopbackHost', () => {
     expect(isLoopbackHost('127.0.0')).toBe(false)
     expect(isLoopbackHost('127.0.0.1.evil.com')).toBe(false)
     expect(isLoopbackHost('')).toBe(false)
+  })
+})
+
+describe('isLoopbackAuthority', () => {
+  it('accepts a loopback authority with any port, and the IPv6 spelling', () => {
+    expect(isLoopbackAuthority('127.0.0.1:3081')).toBe(true)
+    expect(isLoopbackAuthority('127.0.0.1')).toBe(true)
+    expect(isLoopbackAuthority('localhost:3081')).toBe(true)
+    expect(isLoopbackAuthority('[::1]:3081')).toBe(true)
+  })
+
+  it('refuses the authorities a remote or proxied browser names', () => {
+    // The case the source test cannot see: behind a trusted terminator every
+    // socket source is loopback, and this is what keeps those browsers out.
+    expect(isLoopbackAuthority('gw.example.com')).toBe(false)
+    expect(isLoopbackAuthority('192.168.1.5:3081')).toBe(false)
+    expect(isLoopbackAuthority('127.0.0.1.evil.com')).toBe(false)
+    expect(isLoopbackAuthority('')).toBe(false)
+    expect(isLoopbackAuthority(undefined)).toBe(false)
+  })
+
+  it('refuses a host that cannot be parsed as an authority', () => {
+    expect(isLoopbackAuthority('http://[bad')).toBe(false)
+    expect(isLoopbackAuthority('127.0.0.1:not-a-port')).toBe(false)
+  })
+
+  it('refuses anything that is not purely an authority', () => {
+    // URL parsing would happily read the hostname out of each of these; a Host
+    // header can carry none of them, so none of them may read as loopback.
+    expect(isLoopbackAuthority('evil.com@127.0.0.1')).toBe(false)
+    expect(isLoopbackAuthority('127.0.0.1/path')).toBe(false)
+    expect(isLoopbackAuthority('127.0.0.1?x=1')).toBe(false)
+    expect(isLoopbackAuthority('127.0.0.1#frag')).toBe(false)
   })
 })
 

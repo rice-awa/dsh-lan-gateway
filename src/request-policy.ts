@@ -122,6 +122,42 @@ export function isLoopbackHost(hostname: string): boolean {
   )
 }
 
+/**
+ * Whether a `Host` header names a loopback authority (127/8, `localhost`, ::1).
+ *
+ * This is the second half of the gateway's local-management exemption, and it
+ * answers a different question from {@link isLoopbackHost}'s own callers: not
+ * "is this authority loopback" but "did the browser itself use a loopback
+ * address". The two tests are combined on purpose. The socket source is what a
+ * remote client cannot forge; the Host is what a deployment cannot blur — behind
+ * a trusted TLS terminator every socket source is the terminator's loopback
+ * address, so the source test alone would readmit every remote browser, while a
+ * remote browser names the public host it dialed and stays refused.
+ *
+ * A client that can set an arbitrary Host (curl, not a browser) must still pass
+ * the socket-source test and hold a gateway session to reach anything, and the
+ * route behind the prefix is the one the native loopback listener already
+ * answers with no credential at all.
+ * @param host - the `Host` header value, or undefined.
+ * @returns true only when it parses and names a loopback authority.
+ */
+export function isLoopbackAuthority(host: string | undefined): boolean {
+  if (host === undefined || host === '') return false
+  let url: URL
+  try {
+    url = new URL(`http://${host}`)
+  } catch {
+    return false
+  }
+  // A Host header is nothing but an authority. Anything URL parsing had to read
+  // beyond `host[:port]` — userinfo, a path, a query — means the value is not
+  // one, and `http://evil.com@127.0.0.1` must not read as loopback.
+  if (url.username !== '' || url.password !== '' || url.pathname !== '/' || url.search !== '' || url.hash !== '') {
+    return false
+  }
+  return isLoopbackHost(url.hostname)
+}
+
 /** Whether this source must present a gateway session (default: everyone). */
 export function requiresLogin(source: SourceClass, lanPasswordless: boolean): boolean {
   return !(lanPasswordless && source !== 'internet')

@@ -20,11 +20,11 @@ import { apply, inject } from '../src/client/index.ts'
 import {
   FIELDS,
   LanGatewayCard,
-  cardTitle,
   formatValue,
   parseValue,
   passwordProblem,
   passwordStatus,
+  refusedByGateway,
   type FieldDef,
 } from '../src/client/lan-gateway-card.tsx'
 import { MIN_PASSWORD_LENGTH } from '../src/config-fields.ts'
@@ -67,6 +67,28 @@ describe('settings-card tri-state field', () => {
 
   it('rejects an unknown option rather than inventing a value', () => {
     expect(parseValue(secureCookies, 'yes')).toBeUndefined()
+  })
+})
+
+describe('settings-card unreachable-route copy', () => {
+  it("recognizes the gateway's own bare refusal", () => {
+    // The gateway answers the plugin's whole prefix with this exact pair; the
+    // card uses it to say "you are not on the host loopback" instead of the
+    // generic message.
+    expect(refusedByGateway(403, 'forbidden')).toBe(true)
+    expect(refusedByGateway(403, 'forbidden\n')).toBe(true)
+  })
+
+  it('does not mistake any other failure for the gateway', () => {
+    // dsh's own answers, a missing route, and a network drop all take the
+    // generic copy — guessing "gateway" there would send a host-local user
+    // chasing a proxy that was never involved.
+    expect(refusedByGateway(403, 'Forbidden')).toBe(false)
+    expect(refusedByGateway(403, '<html>SPA fallback</html>')).toBe(false)
+    expect(refusedByGateway(401, 'forbidden')).toBe(false)
+    expect(refusedByGateway(404, 'forbidden')).toBe(false)
+    expect(refusedByGateway(200, 'forbidden')).toBe(false)
+    expect(refusedByGateway(502, '')).toBe(false)
   })
 })
 
@@ -117,9 +139,8 @@ describe('settings-card password badge', () => {
 /** One captured `ctx.slots.register` call, with the component it carried. */
 interface Registration {
   name: string
+  key?: string
   id?: string
-  order?: number
-  label?: string | (() => string)
   component: unknown
 }
 
@@ -185,7 +206,7 @@ describe('settings-card slot registration', () => {
     expect(inject).toContain('configForms')
   })
 
-  it('registers into the Plugins page slot, under the profile entry id', () => {
+  it("registers as this bundle's own configuration, under the profile entry id", () => {
     const h = fakeClientContext()
     apply(h.ctx)
 
@@ -196,23 +217,13 @@ describe('settings-card slot registration', () => {
 
     h.serve('dsh-lan-gateway')
     expect(h.registrations).toHaveLength(1)
-    // `settings.plugin.item` was retired in 0.1.7 — a card left there never
-    // mounts, which is the regression this pins.
-    expect(h.registrations[0]?.name).toBe('plugins.item')
-    expect(h.registrations[0]?.id).toBe('dsh-lan-gateway')
-    expect(h.registrations[0]?.order).toBe(30)
+    // `plugins.item` is the OCCUPIED slot dsh reserves for the official
+    // settings pages: registering there made the card pose as an official
+    // plugin. A bundle's own configuration goes in `plugins.bundle.config`,
+    // keyed by the BUNDLE's package name.
+    expect(h.registrations[0]?.name).toBe('plugins.bundle.config')
+    expect(h.registrations[0]?.key).toBe('@riceawa/dsh-lan-gateway')
     expect(h.registrations[0]?.component).toBe(LanGatewayCard)
-  })
-
-  it('carries a label thunk so the page follows the browser language', () => {
-    const h = fakeClientContext()
-    apply(h.ctx)
-    h.serve('dsh-lan-gateway')
-
-    const label = h.registrations[0]?.label
-    expect(typeof label).toBe('function')
-    expect((label as () => string)()).toBe(cardTitle())
-    expect(cardTitle().length).toBeGreaterThan(0)
   })
 
   it('withdraws the card once the Host stops serving the entry', () => {

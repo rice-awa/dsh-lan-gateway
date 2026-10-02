@@ -53,6 +53,7 @@ import {
 } from './login.ts'
 import {
   downstreamResponseHeaders,
+  isLoopbackAuthority,
   isOwnedPath,
   loginOriginAllowed,
   pathOf,
@@ -266,6 +267,24 @@ export class LanGateway {
   }
 
   /**
+   * Whether a request for the gateway-owned management prefix comes from the
+   * host itself, and may therefore be relayed to the loopback-only config and
+   * password routes.
+   *
+   * Both tests are required and neither is sufficient alone. The socket source
+   * is what a remote client cannot forge; the authority the client named is what
+   * a trusted TLS terminator deployment cannot blur, because there every socket
+   * source is the terminator's own loopback address while the browser still
+   * names the public host it dialed. A local browser that used `127.0.0.1` (or
+   * `localhost`) is the same operator the native route already trusts, and it
+   * still has to clear the session gate and the same-site fence below before
+   * anything is forwarded.
+   */
+  private localManagementRequest(req: http.IncomingMessage, source: SourceClass): boolean {
+    return source === 'loopback' && isLoopbackAuthority(req.headers.host)
+  }
+
+  /**
    * The session a request carries, or undefined when it presents none, presents
    * one that no longer verifies under the current epoch, or presents one whose
    * id has been signed out.
@@ -323,7 +342,10 @@ export class LanGateway {
     return `${this.config.cookieName}=${value}; ${attributes}${this.config.secureCookies ? '; Secure' : ''}`
   }
 
-  /** Handle one HTTP request: login surface → owned-path refuse → session gate → same-site gate → relay. */
+  /**
+   * Handle one HTTP request: login surface → owned-path gate → session gate →
+   * same-site gate → relay.
+   */
   private async handleHttp(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const url = req.url ?? '/'
     const pathname = pathOf(url)
@@ -338,10 +360,14 @@ export class LanGateway {
       return
     }
 
-    // The gateway's own management surface never reaches dsh: an unauthenticated
-    // remote request must not be able to touch the loopback-only config route by
-    // having the gateway rewrite Host to loopback for it.
-    if (isOwnedPath(pathname)) {
+    // The gateway's own management surface never reaches dsh from anywhere but
+    // the host itself: an unauthenticated remote request must not be able to
+    // touch the loopback-only config route by having the gateway rewrite Host to
+    // loopback for it. A host-local browser (`localManagementRequest`) is
+    // exempt, so the settings card on the gateway origin behaves like the native
+    // card instead of being refused exactly where the user goes looking for it;
+    // it still has to clear the session and same-site gates below.
+    if (isOwnedPath(pathname) && !this.localManagementRequest(req, source)) {
       res.writeHead(403, this.securityHeaders())
       res.end('forbidden')
       return

@@ -1,19 +1,23 @@
 /**
- * The lan-gateway settings card, rendered by the official DSH Plugins page
- * through its `plugins.item` slot.
+ * The lan-gateway configuration card, rendered by the official DSH Plugins page
+ * on this bundle's own page through its `plugins.bundle.config` slot.
  *
  * ModLens-style: the card carries NO injected services. It reads and writes
  * the loopback-only `/lan-gateway/config` host route (the browser never sees
  * the settings seam or any secret), so the only platform service it needs is
  * the `slots` service every plugin already has.
  *
+ * The page — not the card — draws the plugin's title, icon, and crumb, and the
+ * card is the page body: `view: 'summary'` renders nothing (bundle
+ * configuration is `page`-only).
+ *
  * @module @riceawa/dsh-lan-gateway/client/card
  */
 
 import { useEffect, useState, type ChangeEvent, type ReactNode } from 'react'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-// Type-only. The Plugins page owns the `plugins.item` contract, and its own
-// doc says a registrant merges that contract with `import type` instead of
+// Type-only. The Plugins page owns the `plugins.bundle.config` contract, and its
+// own doc says a registrant merges that contract with `import type` instead of
 // importing the package at runtime. Taking the contract from its owner is also
 // what turns the next upstream rename of this slot into a compile error here,
 // rather than a card that quietly stops rendering.
@@ -29,12 +33,12 @@ import {
 } from '../config-fields.ts'
 
 /**
- * Props the renderer binds for this card. The Plugins page asks for either the
- * card's one-liner (`summary`) or the body of its own page (`page`), and draws
- * the page's title, icon, and crumb itself. The card needs no injected face —
- * it fetches its own route.
+ * Props the renderer binds for this card. The Plugins page asks a bundle's
+ * configuration entry only for the body of its own page (`page`); the shared
+ * contract still carries `summary`, which bundle configuration never renders.
+ * The card needs no injected face — it fetches its own route.
  */
-export type LanGatewayCardProps = PropsRuntime<'plugins.item'>
+export type LanGatewayCardProps = PropsRuntime<'plugins.bundle.config'>
 
 /**
  * The card's field table and value codecs live in `config-fields.ts`, shared
@@ -97,6 +101,23 @@ export function passwordProblem(password: string, confirm: string): PasswordProb
   return null
 }
 
+/**
+ * Whether the config route's refusal came from the gateway rather than from dsh
+ * itself.
+ *
+ * The gateway owns the `/lan-gateway*` prefix and answers it with a bare 403
+ * `forbidden` whenever the client is not on the host; dsh, when it answers the
+ * route at all, does not produce that pair. Telling the two apart is what lets
+ * the card say "you are not on the host loopback" instead of the generic
+ * "cannot read the configuration".
+ * @param status - the HTTP status of the failed read.
+ * @param body - that response's body.
+ * @returns true when the gateway itself refused the read.
+ */
+export function refusedByGateway(status: number, body: string): boolean {
+  return status === 403 && body.trim() === 'forbidden'
+}
+
 /* ------------------------------------------------------------------ */
 /* Bilingual copy (ModLens-style: two small sets, picked by browser)   */
 /* ------------------------------------------------------------------ */
@@ -110,6 +131,7 @@ interface Labels {
   discard: string
   reset: string
   readOnly: string
+  readOnlyGateway: string
   saveFailed: string
   loadFailed: string
   emptyMeansClear: string
@@ -146,7 +168,8 @@ const LABELS: Record<'zh' | 'en', Labels> = {
     saving: '保存中…',
     discard: '放弃',
     reset: '重置',
-    readOnly: '网关设置只能在宿主机本机打开 dsh web 时修改：配置路由仅监听回环地址，经网关远程访问的浏览器会被拒绝。远程请改用 lan_gateway 工具。',
+    readOnly: '读不到网关配置：这个接口只在宿主机本机应答——Host 必须是回环地址且同源。请在宿主机上打开 dsh web 时修改，远程请改用 lan_gateway 工具。',
+    readOnlyGateway: '网关拒绝了这次读取：/lan-gateway/* 管理面由网关独占，只放行「TCP 来源为回环 且 地址写的是 127.0.0.1 / localhost」的浏览器。你现在不是从宿主机回环地址访问的——请在宿主机上用 127.0.0.1 或 localhost 打开本页（局域网 IP、域名都不算），或远程改用 lan_gateway 工具。',
     saveFailed: '保存未生效，请检查输入后重试。',
     loadFailed: '无法读取网关配置',
     emptyMeansClear: '留空 = 使用默认',
@@ -211,7 +234,8 @@ const LABELS: Record<'zh' | 'en', Labels> = {
     saving: 'Saving…',
     discard: 'Discard',
     reset: 'Reset',
-    readOnly: 'Gateway settings can only be changed where dsh web runs locally: the config route listens on loopback only, so a browser reaching dsh through the gateway is refused. Use the lan_gateway tool remotely.',
+    readOnly: 'Cannot read the configuration: the route answers on the host only — the Host must be a loopback address and same-origin. Change the settings where dsh web runs on the host, or use the lan_gateway tool remotely.',
+    readOnlyGateway: 'The gateway refused this read: it owns the /lan-gateway/* management plane and admits only browsers that are both loopback-sourced and using a 127.0.0.1 / localhost address. You are not on the host loopback — open this page on the host via 127.0.0.1 or localhost (a LAN IP or a hostname does not qualify), or use the lan_gateway tool remotely.',
     saveFailed: 'The save did not land — check the inputs and retry.',
     loadFailed: 'Cannot read the gateway configuration',
     emptyMeansClear: 'Empty = default',
@@ -275,34 +299,24 @@ function labels(): Labels {
   return lang.startsWith('zh') ? LABELS.zh : LABELS.en
 }
 
-/**
- * The card's title in the browser's language, for the Plugins page's list
- * entry. A thunk so the label follows the page's locale without re-registering.
- * @returns the localized card title.
- */
-export function cardTitle(): string {
-  return labels().title
-}
-
 /* ------------------------------------------------------------------ */
 /* Card                                                                */
 /* ------------------------------------------------------------------ */
 
 /**
- * Render the LAN gateway card. Self-loading: fetches the config route on
- * mount, posts the edited config on save.
+ * Render the LAN gateway configuration card. Self-loading: fetches the config
+ * route on mount, posts the edited config on save.
  *
- * `view` swaps between the card's one-liner and its page body, so the branch
- * sits after the hooks: the Plugins page re-renders one contribution under the
- * other view when the card is opened.
+ * `summary` renders nothing: dsh asks a bundle's own configuration for its page
+ * body only, and the card's former one-liner (a list entry on the official
+ * plugin card) went away with `plugins.item`.
  * @param props - the view the Plugins page is asking for.
- * @returns the one-liner, the card, or nothing while the route is unreachable.
+ * @returns the page body, or nothing while the view is `summary`.
  */
 export function LanGatewayCard(props: LanGatewayCardProps): ReactNode {
   const t = labels()
-  const [open, setOpen] = useState(false)
   const [route, setRoute] = useState<RouteState | null>(null)
-  const [loadFailed, setLoadFailed] = useState(false)
+  const [failure, setFailure] = useState<'gateway' | 'other' | null>(null)
   const [drafts, setDrafts] = useState<Partial<Record<string, string>>>({})
   const [saving, setSaving] = useState(false)
   const [failed, setFailed] = useState<string | null>(null)
@@ -320,38 +334,38 @@ export function LanGatewayCard(props: LanGatewayCardProps): ReactNode {
     fetch('/lan-gateway/config')
       .then(async (response) => {
         if (cancelled) return
-        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        if (!response.ok) {
+          // The body is only read to tell the gateway's own bare refusal from
+          // any other answer; it is never rendered.
+          const body = await response.text().catch(() => '')
+          if (!cancelled) setFailure(refusedByGateway(response.status, body) ? 'gateway' : 'other')
+          return
+        }
         setRoute(await response.json() as RouteState)
       })
       .catch(() => {
-        if (!cancelled) setLoadFailed(true)
+        if (!cancelled) setFailure('other')
       })
     return () => { cancelled = true }
   }, [])
 
-  // The Plugins page lists this plugin as one card and opens its own page on
-  // demand: `summary` is the one-liner the list shows, `page` the body. The
-  // hooks above run for both views, because the same contribution flips
-  // between them.
-  if (props.view === 'summary') return t.description
+  // dsh asks a bundle for its own configuration under `view: 'page'` only, and
+  // the page draws the title, icon, and crumb itself — so the card is the page
+  // body and has no one-liner. Returning null keeps the contribution honest for
+  // a host that ever asks for the other view.
+  if (props.view === 'summary') return null
 
-  // A remote browser reaches this card through the gateway, which answers 403
-  // for the plugin's own prefix by design, so the route is unreachable exactly
-  // where a user is most likely to go looking for the setting. Rendering
-  // nothing left them with a blank entry and no way to tell a missing card from
-  // a broken one; say what is wrong and where the card does work instead.
-  if (loadFailed) {
+  // A browser that is not on the host reaches this card through the gateway,
+  // which answers 403 for the plugin's own prefix by design, so the route is
+  // unreachable exactly where a user is most likely to go looking for the
+  // setting. Rendering nothing left them with a blank entry and no way to tell a
+  // missing card from a broken one; say what is wrong — and whether the gateway
+  // or the host refused — and where the card does work instead.
+  if (failure !== null) {
     return (
       <div style={styles.card}>
-        <div style={styles.header}>
-          <span style={styles.headerTop}>
-            <span style={styles.name}>{t.title}</span>
-          </span>
-          <span style={styles.description}>{t.loadFailed}</span>
-        </div>
-        <div style={styles.body}>
-          <p style={styles.hint}>{t.readOnly}</p>
-        </div>
+        <p style={styles.status}>{t.loadFailed}</p>
+        <p style={styles.hint}>{failure === 'gateway' ? t.readOnlyGateway : t.readOnly}</p>
       </div>
     )
   }
@@ -571,114 +585,103 @@ export function LanGatewayCard(props: LanGatewayCardProps): ReactNode {
   const statusLine = `${route.running ? t.running : t.stopped} · ${t.tls}: ${route.tls} · :${route.port}`
 
   return (
-    <div style={open ? { ...styles.card, ...styles.cardOpen } : styles.card}>
-      <button
-        type="button"
-        style={styles.header}
-        aria-expanded={open}
-        onClick={() => { setOpen(!open) }}
-      >
-        <span style={styles.headerTop}>
-          <span style={styles.name}>{t.title}</span>
-          <span style={styles.status} title={statusLine}>{statusLine}</span>
-          {dirty ? <span style={styles.pending}>{t.unsaved}</span> : null}
-          <span style={open ? { ...styles.chevron, ...styles.chevronOpen } : styles.chevron}>{open ? '▾' : '▸'}</span>
-        </span>
-        <span style={styles.description}>{t.description}</span>
-      </button>
-      {open
-        ? (
-          <div style={styles.body}>
-            {route.lastError ? <p style={styles.error} role="status">{t.lastError}: {route.lastError}</p> : null}
-            <div style={styles.section}>
-              <div style={styles.sectionHead}>
-                <span style={styles.label}>{t.passwordSection}</span>
-                <span style={passwordBadge === 'unset' ? styles.badgeAlert : styles.badge}>
-                  {passwordBadge === 'set'
-                    ? t.passwordSet
-                    : passwordBadge === 'unset' ? t.passwordUnset : t.passwordUnknown}
-                </span>
-              </div>
-              <p style={styles.hint}>{t.passwordHint}</p>
-              {passwordBadge === 'unset' ? <p style={styles.error}>{t.passwordRequired}</p> : null}
-              {passwordBadge === 'unknown' ? <p style={styles.hint}>{t.passwordHostStale}</p> : null}
-              <div style={styles.passwordRow}>
-                <input
-                  id="lan-gw-password"
-                  type="password"
-                  autoComplete="new-password"
-                  aria-label={t.passwordNew}
-                  style={passwordInput}
-                  placeholder={t.passwordNew}
-                  value={password}
-                  disabled={passwordBusy}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                    setPasswordDraft(e.target.value)
-                    setPasswordError(null)
-                    setPasswordNotice(null)
-                  }}
-                />
-                <input
-                  id="lan-gw-password-confirm"
-                  type="password"
-                  autoComplete="new-password"
-                  aria-label={t.passwordConfirm}
-                  style={passwordInput}
-                  placeholder={t.passwordConfirm}
-                  value={passwordConfirm}
-                  disabled={passwordBusy}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                    setPasswordConfirmDraft(e.target.value)
-                    setPasswordError(null)
-                    setPasswordNotice(null)
-                  }}
-                />
-              </div>
-              <div style={styles.passwordFoot}>
-                {passwordError !== null
-                  ? <p style={styles.error} role="alert">{passwordError}</p>
-                  : passwordNotice !== null
-                    ? <p style={styles.notice} role="status">{passwordNotice}</p>
-                    : passwordTyping && passwordDraftProblem !== null
-                      ? (
-                        <p style={styles.error} role="status">
-                          {passwordDraftProblem === 'tooShort' ? t.passwordTooShort : t.passwordMismatch}
-                        </p>
-                      )
-                      : null}
-                <button
-                  type="button"
-                  style={styles.save}
-                  disabled={passwordBusy || passwordDraftProblem !== null}
-                  onClick={() => { void changePassword() }}
-                >
-                  {passwordBusy ? t.saving : t.passwordChange}
-                </button>
-              </div>
-            </div>
-            {FIELDS.map(def => <div key={def.field}>{renderControl(def)}</div>)}
-            <div style={styles.footer}>
-              {failed ? <p style={styles.error} role="status">{failed}</p> : null}
-              <button
-                type="button"
-                style={styles.discard}
-                disabled={!dirty || saving}
-                onClick={discard}
-              >
-                {t.discard}
-              </button>
-              <button
-                type="button"
-                style={styles.save}
-                disabled={!dirty || invalid() || saving}
-                onClick={() => { void save() }}
-              >
-                {saving ? t.saving : t.save}
-              </button>
-            </div>
+    <div style={styles.card}>
+      {/* The page above draws the plugin's title itself, so the card opens with
+          the live listener status and the unsaved marker — the two facts an
+          operator wants before touching a field. */}
+      <div style={styles.statusRow}>
+        <span style={styles.status} title={statusLine}>{statusLine}</span>
+        {dirty ? <span style={styles.pending}>{t.unsaved}</span> : null}
+      </div>
+      <div style={styles.body}>
+        {route.lastError ? <p style={styles.error} role="status">{t.lastError}: {route.lastError}</p> : null}
+        <div style={styles.section}>
+          <div style={styles.sectionHead}>
+            <span style={styles.label}>{t.passwordSection}</span>
+            <span style={passwordBadge === 'unset' ? styles.badgeAlert : styles.badge}>
+              {passwordBadge === 'set'
+                ? t.passwordSet
+                : passwordBadge === 'unset' ? t.passwordUnset : t.passwordUnknown}
+            </span>
           </div>
-        )
-        : null}
+          <p style={styles.hint}>{t.passwordHint}</p>
+          {passwordBadge === 'unset' ? <p style={styles.error}>{t.passwordRequired}</p> : null}
+          {passwordBadge === 'unknown' ? <p style={styles.hint}>{t.passwordHostStale}</p> : null}
+          <div style={styles.passwordRow}>
+            <input
+              id="lan-gw-password"
+              type="password"
+              autoComplete="new-password"
+              aria-label={t.passwordNew}
+              style={passwordInput}
+              placeholder={t.passwordNew}
+              value={password}
+              disabled={passwordBusy}
+              onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                setPasswordDraft(e.target.value)
+                setPasswordError(null)
+                setPasswordNotice(null)
+              }}
+            />
+            <input
+              id="lan-gw-password-confirm"
+              type="password"
+              autoComplete="new-password"
+              aria-label={t.passwordConfirm}
+              style={passwordInput}
+              placeholder={t.passwordConfirm}
+              value={passwordConfirm}
+              disabled={passwordBusy}
+              onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                setPasswordConfirmDraft(e.target.value)
+                setPasswordError(null)
+                setPasswordNotice(null)
+              }}
+            />
+          </div>
+          <div style={styles.passwordFoot}>
+            {passwordError !== null
+              ? <p style={styles.error} role="alert">{passwordError}</p>
+              : passwordNotice !== null
+                ? <p style={styles.notice} role="status">{passwordNotice}</p>
+                : passwordTyping && passwordDraftProblem !== null
+                  ? (
+                    <p style={styles.error} role="status">
+                      {passwordDraftProblem === 'tooShort' ? t.passwordTooShort : t.passwordMismatch}
+                    </p>
+                  )
+                  : null}
+            <button
+              type="button"
+              style={styles.save}
+              disabled={passwordBusy || passwordDraftProblem !== null}
+              onClick={() => { void changePassword() }}
+            >
+              {passwordBusy ? t.saving : t.passwordChange}
+            </button>
+          </div>
+        </div>
+        {FIELDS.map(def => <div key={def.field}>{renderControl(def)}</div>)}
+        <div style={styles.footer}>
+          {failed ? <p style={styles.error} role="status">{failed}</p> : null}
+          <button
+            type="button"
+            style={styles.discard}
+            disabled={!dirty || saving}
+            onClick={discard}
+          >
+            {t.discard}
+          </button>
+          <button
+            type="button"
+            style={styles.save}
+            disabled={!dirty || invalid() || saving}
+            onClick={() => { void save() }}
+          >
+            {saving ? t.saving : t.save}
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -697,13 +700,10 @@ function tk(token: string, fallback: string): string {
 const L = {
   border: tk('--dsw-alias-border-l2', 'rgba(127,127,127,0.35)'),
   bg: tk('--dsw-alias-bg-layer-3', 'transparent'),
-  bgOpen: tk('--dsw-alias-bg-layer-2', 'transparent'),
   labelPrimary: tk('--dsw-alias-label-primary', 'inherit'),
   labelSecondary: tk('--dsw-alias-label-secondary', 'inherit'),
   labelTertiary: tk('--dsw-alias-label-tertiary', 'rgba(127,127,127,0.8)'),
-  labelDimmed: tk('--dsw-alias-label-dimmed', 'rgba(127,127,127,0.6)'),
   error: tk('--dsw-alias-label-error', '#d1242f'),
-  brand: tk('--dsw-alias-brand-primary', '#4f6ef7'),
   badgeBg: tk('--dsw-alias-bg-module-platform', 'rgba(127,127,127,0.14)'),
 }
 
@@ -713,47 +713,27 @@ const styles: Record<string, React.CSSProperties> = {
     border: `1px solid ${L.border}`,
     borderRadius: '12px',
     background: L.bg,
-    transition: 'border-color .16s, background .16s',
-    overflow: 'hidden',
-  },
-  cardOpen: {
-    background: L.bgOpen,
-    borderColor: L.labelDimmed,
-  },
-  header: {
     display: 'flex',
     flexDirection: 'column',
-    alignItems: 'stretch',
-    gap: '6px',
-    width: '100%',
-    padding: '14px 16px',
-    border: 0,
-    background: 'none',
-    font: 'inherit',
-    color: 'inherit',
-    textAlign: 'left',
-    cursor: 'pointer',
+    overflow: 'hidden',
   },
-  headerTop: { display: 'flex', alignItems: 'center', gap: '12px', width: '100%' },
-  name: { flex: '1 1 auto', minWidth: 0, fontSize: '15px', fontWeight: 600, lineHeight: 1.4, color: L.labelPrimary },
+  // The page draws the plugin's title above this body, so the card leads with
+  // the live listener status and the unsaved marker instead.
+  statusRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '12px',
+    padding: '12px 16px',
+    borderBottom: `1px solid ${L.border}`,
+  },
   // The status carries a verbose TLS cert summary; cap it and ellipsize so it
-  // can never swallow the row or squeeze the title (the old nowrap alone
-  // caused the description to be pushed into a thin wrapping column).
+  // can never swallow the row.
   status: {
     flex: '0 1 auto',
     minWidth: 0,
-    maxWidth: '60%',
+    maxWidth: '80%',
     fontSize: '11px',
     lineHeight: 1.4,
-    color: L.labelTertiary,
-    whiteSpace: 'nowrap',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-  },
-  description: {
-    display: 'block',
-    fontSize: '13px',
-    lineHeight: 1.5,
     color: L.labelTertiary,
     whiteSpace: 'nowrap',
     overflow: 'hidden',
@@ -770,12 +750,8 @@ const styles: Record<string, React.CSSProperties> = {
     background: L.badgeBg,
     color: L.labelSecondary,
   },
-  chevron: { flex: 'none', color: L.labelTertiary, fontSize: '12px', transition: 'transform .16s' },
-  chevronOpen: { transform: 'rotate(180deg)' },
   body: {
-    borderTop: `1px solid ${L.border}`,
-    margin: '0 16px',
-    paddingBottom: '8px',
+    padding: '4px 16px 8px',
     display: 'flex',
     flexDirection: 'column',
   },
