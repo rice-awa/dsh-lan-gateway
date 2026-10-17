@@ -1,5 +1,17 @@
 # 更新日志
 
+## 0.7.3
+
+恢复 dsh 0.2.0 兼容。0.7.2 把 `@deepseek-ai/dsh-*` peer 收窄到 `^0.2.1-rc.1`，但 0.7.1 → 0.7.2 的 `src/` 一行未改——这次收窄只是声明层面的变化，却让 0.2.0 线在重启后失去整个插件。
+
+**0.2.0 的判定读的是 peer，不是 `engines.dsh`。** dsh 0.2.0-rc.2 的启动评估器（`@deepseek-ai/dsh-app-boot` 的 `evaluatePluginCompatibility`）只比较 `@deepseek-ai/dsh-*` peer 范围；不满足时把 bundle 放进 `skippedBundles` 并继续启动，不报错也不提示。表现就是网关不监听、Plugins 页没有本插件的配置页，而 dsh 本身看起来一切正常。
+
+**两处声明同时覆盖两条线。** `engines.dsh` 与 `dsh-settings` / `dsh-tools` peer 现在都声明 `^0.2.0-rc.1 || ^0.2.1-rc.1`。显式并集是必要的：普通 semver 规则下 `0.2.1-rc.1` 不属于 `^0.2.0-rc.1`，反过来 `0.2.0-rc.2` 也不属于 `^0.2.1-rc.1`。`cordis` / `schemastery` peer 同步放宽到 0.2.0 实际携带的 `^4.0.4` / `^3.18.4`（caret 仍然接纳 0.2.1 的 4.0.5 / 3.18.5）。开发依赖保持在 0.2.1-rc.1，类型检查针对最新线。
+
+**验证。** 直接调用两套运行时的 `evaluatePluginCompatibility`：0.2.0-rc.2 与 0.2.1-rc.2 对新 manifest 都返回 `undefined`（兼容）。0.1.7 及更早版本仍不支持。
+
+**测试面。** 新增 `tests/compatibility.test.ts`，把「两条 0.2.x 线都必须在 `engines.dsh` 与两个 dsh peer 里出现、且不得重新写入 0.1.7」钉成断言。测试总数 220 → 225。
+
 ## 0.7.2
 
 适配 dsh 0.2.1-rc.1。**这是破坏性变更**：peer 收敛为 `@deepseek-ai/dsh-settings` / `dsh-tools` `^0.2.1-rc.1`，并新增 `engines.dsh: ^0.2.1-rc.1`；0.1.7 与 0.2.0 线不再支持。
