@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A DeepSeek Harness (dsh) plugin: `@riceawa/dsh-lan-gateway`. `dsh web` hard-refuses `--host 0.0.0.0`, so dsh keeps binding `127.0.0.1` and this plugin runs its own reverse-proxy gateway on the unspecified address (dual-stack), rewriting `Host`/`Origin` back to loopback. Since 0.5.0 the model is default-deny (hardening for QVD-2026-57410): every source, loopback included, must present a gateway session, and against a session-capable dsh base the gateway relays one shared upstream browser session so upstream authorization still gates every request.
+A DeepSeek Harness (dsh) plugin: `@riceawa/dsh-lan-gateway`. `dsh web` hard-refuses `--host 0.0.0.0`, so dsh keeps binding `127.0.0.1` and this plugin runs its own reverse-proxy gateway on the unspecified address (dual-stack), rewriting `Host`/`Origin` back to loopback. Since 0.5.0 the model is default-deny (hardening for QVD-2026-57410): every source, loopback included, must present a gateway session, and against a session-capable dsh base the gateway relays one shared upstream browser session so upstream authorization still gates every request. Built against dsh 0.2.1-rc.1: `engines.dsh` declares `^0.2.1-rc.1`, and the 0.1.7 / 0.2.0 lines are no longer supported.
 
 ## Commands
 
@@ -14,7 +14,7 @@ pnpm is the package manager (`packageManager` field, pnpm@11.20.0). Node 22 in C
 pnpm install
 pnpm build        # tsdown: builds BOTH bundles (host lib/index.js + client lib/client.js)
 pnpm typecheck    # two tsconfigs, both must pass
-pnpm test         # vitest run, 219 tests
+pnpm test         # vitest run, 220 tests
 npx vitest run tests/gateway.test.ts   # one file
 npx vitest run -t "rate limit"         # one test by name
 ```
@@ -57,6 +57,8 @@ WebSocket upgrades run the same gates through `handleUpgrade`, and each upgraded
 
 ### Invariants that span files
 
+- **Compatibility is declared with `engines.dsh`.** Since 0.2.1 dsh evaluates a plugin's own `engines.dsh` first, and when present it alone decides — the `@deepseek-ai/dsh-*` peers are ignored. Declaring `^0.2.1-rc.1` keeps 0.2.1-rc.2 and later 0.2.x installable while refusing older lines; a peer-only declaration would be evaluated package by package and can silently skip the plugin.
+- **A config save answers before the listener reconciles.** The card can be served *through* the gateway on a loopback authority, so the restart a save triggers resets the listener relaying that save's own response. `/lan-gateway/config` therefore writes the response first and reconciles afterwards, `snapshot()` reports `running` optimistically as the saved `enabled`, and `LanGateway.close()` drains in-flight HTTP responses for `CLOSE_GRACE_MS` before force-closing (upgraded sockets still close immediately). A failed start is observable as `lastError` on the next read, not on the save response.
 - **Path decisions use `pathOf`, forwarding uses the raw `req.url`.** `pathOf` applies WHATWG normalization (dot-segment collapsing) and strips trailing slashes, matching how dsh's router resolves the request. Any new owned-path or route test must go through `pathOf`; a raw-string prefix test disagrees with dsh on `/foo/../lan-gateway/config`.
 - **Config vs state.** Everything in `Config` is safe to appear in `--dump-config`; the cookie-signing secret and scrypt password hash live only in `state.json`. Never move a secret into the schema — which is why the card changes the password over its own `/lan-gateway/password` route (same loopback/same-origin fence as the config route, set-only: clearing stops the listener and stays a tool command) instead of adding a settings key, and why the snapshot answers `passwordSet` as a boolean and never the hash, the salt, or the length.
 - **Default-deny.** Source classification grants nothing by itself. `lanPasswordless` is an explicit opt-in and is refused unless the base has browser-session auth (detected by the `connection` service attaching) — a "trust my LAN" choice must never reinstall the original Host-trust hole.

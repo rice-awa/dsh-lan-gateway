@@ -1,5 +1,19 @@
 # 更新日志
 
+## 0.7.2
+
+适配 dsh 0.2.1-rc.1。**这是破坏性变更**：peer 收敛为 `@deepseek-ai/dsh-settings` / `dsh-tools` `^0.2.1-rc.1`，并新增 `engines.dsh: ^0.2.1-rc.1`；0.1.7 与 0.2.0 线不再支持。
+
+**兼容性声明改用 `engines.dsh`。** 0.2.1 起 dsh 在安装和启动时优先读取插件 manifest 的 `engines.dsh` 判定兼容性，只有未声明时才回退到逐个 `@deepseek-ai/dsh-*` peer 范围。0.7.x 此前没有该字段；现在显式声明 `^0.2.1-rc.1`（覆盖 0.2.1-rc.2 及后续 0.2.x），声明即唯一判据。实测 0.2.1-rc.2 启动时本插件不再被兼容性检查跳过。
+
+**移除 `@deepseek-ai/dsh-invariants` 开发依赖。** 0.2.1 移除了运行时 invariant 插件及各包的 `./invariant` 导出；本插件从未导入该包。
+
+**依赖线更新。** `@deepseek-ai/cordis` 4.0.4 → 4.0.5，`cordis-plugin-loader` 1.0.5 → 1.0.6，`cosmokit` 1.8.5 → 1.8.6，`schemastery` 3.18.4 → 3.18.5，其余 `@deepseek-ai/dsh-*`（含 `dsh-client-ui-renderer`、`dsh-cordis-client-runner`）同步到 0.2.1-rc.1。
+
+**修复：经网关保存配置时，响应被自己的重启掐断。** 0.7.0 允许宿主机浏览器经网关管理配置后，保存任何影响监听器的字段都会走「先写 settings，再同步重启监听器」的路径；重启调用 `closeAllConnections()`，把承载这次保存响应的连接一并销毁。结果是值已经写入、卡片却显示「保存未生效」（实测 `POST /lan-gateway/config` 报 `ERR_EMPTY_RESPONSE`，服务端配置已是新值）。现在配置路由先写出响应再执行 reconcile，`running` 按保存后的 `enabled` 报告；`LanGateway.close()` 在 `CLOSE_GRACE_MS`（1 秒）内等待在途 HTTP 响应完成再强制关闭，WebSocket 升级仍然立即断开。启动失败改由下一次读取的 `lastError` 反映——重启本身会关闭当前连接，无法在同一响应里回传。新增 1 项集成测试：响应在途时关闭监听器，客户端仍收到完整响应；测试总数 219 → 220。
+
+**测试面。** `pnpm typecheck`（两份 tsconfig）与全量 220 项测试在 0.2.1-rc.1 依赖上通过；另在隔离 `DSH_HOME` 中用 dsh 0.2.1（rc.2 运行时）做端到端验证：网关登录与跳转、共享上游会话中继、`/api/remote.mux` WebSocket 升级、`plugins.bundle.config` 配置页渲染、经网关的配置读取与保存、改密（旧密码立即失效）。0.2.1 新增的 `--host` 与 `--tls-cert` / `--tls-key` 不改变网关的定位：网关仍向 `127.0.0.1` 转发，改用 dsh 原生绑定时应关闭网关（README 已注明）。
+
 ## 0.7.1
 
 桌面版里保存网关配置不再被自己的围栏拒之门外。桌面应用的界面不是从 `http://127.0.0.1:<port>` 提供，而是从自定义来源 **`dsh-app://app`** 提供，每个非静态路径都走一条桥（`@deepseek-ai/dsh-desktop-host` 的 `forwardWebRequest`）转发到回环主机，转发时**删掉 `host` / `origin` / `cookie` / `sec-fetch-site`**，只补回 dsh 自己的宿主会话 Cookie。于是桌面卡片**读**配置（GET，本就不带 Origin）一切正常，而**保存**（POST）到达 `/lan-gateway/config` 时既没有 Origin、方法又不是只读——`isTrustedConfigRequest` 里那条「写操作必须带 Origin」把每一次保存都判成 403，界面上就是卡片自带的错误行原文 `request refused: this route answers same-origin loopback requests only`；改密路由共用同一道围栏，症状一模一样。这是一个「能读、不能写」的死卡片，而且只发生在宿主机用户自己身上。
