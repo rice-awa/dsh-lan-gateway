@@ -838,3 +838,45 @@ describe('LanGateway end-to-end against a fake upstream', () => {
     }
   })
 })
+
+describe('listener shutdown', () => {
+  it('drains an in-flight response before force-closing', async () => {
+    let respond: (() => void) | undefined
+    let received!: () => void
+    const receivedRequest = new Promise<void>((resolve) => { received = resolve })
+    const server = http.createServer((_req, res) => {
+      respond = () => {
+        res.writeHead(200, { 'content-type': 'text/plain' })
+        res.end('LATE')
+      }
+      received()
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const upstream: UpstreamHarness = {
+      server,
+      port: (server.address() as AddressInfo).port,
+      seen: [],
+      respondNext: () => { /* this test drives the response by hand */ },
+      close: () => new Promise<void>((done) => server.close(() => done())),
+    }
+    const { gateway, port } = await startGateway(await authedState(), upstream, {
+      lanPasswordless: true,
+      source: 'loopback',
+    })
+    try {
+      const pending = req(port, 'GET', '/')
+      await receivedRequest
+      // A config save restarts the listener while its own response is in
+      // flight; the response must still arrive.
+      const closing = gateway.close()
+      respond!()
+      const res = await pending
+      expect(res.status).toBe(200)
+      expect(res.body).toBe('LATE')
+      await closing
+    } finally {
+      await gateway.close()
+      await upstream.close()
+    }
+  })
+})

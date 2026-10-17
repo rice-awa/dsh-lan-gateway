@@ -71,6 +71,15 @@ import {
 } from './state.ts'
 import type { UpstreamSession } from './upstream-session.ts'
 
+/**
+ * How long a listener shutdown lets in-flight HTTP responses finish before the
+ * remaining sockets are force-closed. A config save is relayed *through* the
+ * gateway when the card is opened on the host's loopback authority, so the
+ * restart that save triggers must not sever the response carrying its result;
+ * a long-lived stream (the Plugins event feed) still closes at this deadline.
+ */
+const CLOSE_GRACE_MS = 1000
+
 /** Configuration the gateway needs at listen time. */
 export interface GatewayConfig {
   /** Port to bind on the unspecified address (dual-stack; see {@link LanGateway.listen}). */
@@ -217,15 +226,33 @@ export class LanGateway {
     return `${host}:${address.port}`
   }
 
-  /** Close the server, drop every socket, and stop accepting connections. */
+  /**
+   * Stop accepting connections, close upgraded sockets, and resolve once the
+   * remaining HTTP responses have finished — or after {@link CLOSE_GRACE_MS},
+   * whichever comes first. A config save resets the listener underneath the
+   * request that carried it, so an immediate `closeAllConnections()` would
+   * destroy the response before the operator sees it.
+   */
   async close(): Promise<void> {
     if (this.disposed) return
     this.disposed = true
     this.gate += 1
     this.destroyAllSockets()
     return new Promise((resolve) => {
-      this.server.close(() => resolve())
-      this.server.closeAllConnections()
+      let settled = false
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const finish = (): void => {
+        if (settled) return
+        settled = true
+        if (timer !== undefined) clearTimeout(timer)
+        resolve()
+      }
+      timer = setTimeout(() => {
+        this.server.closeAllConnections()
+      }, CLOSE_GRACE_MS)
+      timer.unref()
+      this.server.close(finish)
+      this.server.closeIdleConnections()
     })
   }
 

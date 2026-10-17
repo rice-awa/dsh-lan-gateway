@@ -19,7 +19,7 @@
  * developer's real one — on Windows.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
 import { mkdtempSync, rmSync } from 'node:fs'
 import type { AddressInfo } from 'node:net'
@@ -591,7 +591,9 @@ describe('the tool and the card share one run intent', () => {
     // The card writes the same field the tool wrote, so it can undo it. Under
     // the old design the tool held a private override the card could not reach.
     await h.post({ enabled: false })
-    expect(await running(h)).toBe(false)
+    // The response is written before the listener reconciles: when the card is
+    // served through the gateway, the restart would otherwise sever the response.
+    await vi.waitFor(async () => { expect(await running(h)).toBe(false) })
   })
 
   it('starts from the card, stops from the tool', async () => {
@@ -600,7 +602,7 @@ describe('the tool and the card share one run intent', () => {
     await h.run({ command: 'set-password', password: PASSWORD })
 
     await h.post({ enabled: true })
-    expect(await running(h)).toBe(true)
+    await vi.waitFor(async () => { expect(await running(h)).toBe(true) })
     expect((await h.run({ command: 'disable' })).ok).toBe(true)
     expect(await running(h)).toBe(false)
   })

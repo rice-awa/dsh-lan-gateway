@@ -887,16 +887,21 @@ export function apply(ctx: Context, config: ConfigRefs): void {
       // leave a null where the config expects a string, and `!== undefined`
       // tests elsewhere would then read that null as a declared value.
       if (ops.length > 0) await settings.mutate(entryId, ops)
-      // The write commits through the section's watcher; reconcile explicitly so
-      // the response reports a settled listener rather than a mid-restart one.
-      await syncGateway('config route save')
-      const next = { ...snapshot() }
+      // Answer before reconciling. When the card is opened on the host's
+      // loopback authority through the gateway, a listener change restarts the
+      // very server relaying this response; `LanGateway.close()` drains the
+      // in-flight response, but only if it was already written. `running`
+      // reports the intended post-save state; a failed start surfaces as
+      // `lastError` on the next read, which the card cannot see on a socket
+      // the restart has to close.
+      const next: Record<string, unknown> = { ...snapshot(), running: candidate.enabled }
       if (unknown.length > 0) {
         // Not an error: an older client may post fields this build dropped. Say
         // so rather than dropping them silently.
         next['ignored'] = unknown
       }
       send(200, next)
+      await syncGateway('config route save')
     } catch (error) {
       send(409, { error: error instanceof Error ? error.message : String(error) })
     }
