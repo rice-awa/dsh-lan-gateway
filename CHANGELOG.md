@@ -1,5 +1,13 @@
 # 更新日志
 
+## 0.7.4
+
+适配 dsh 0.2.1-rc.5。`src/` 一行未改：`engines.dsh` 与 `@deepseek-ai/dsh-*` peer 仍为 `^0.2.0-rc.1 || ^0.2.1-rc.1`，rc.5 与它们处于同一个 0.2.1 版本元组，声明层面无需调整。
+
+**依赖线更新。** 18 个 `@deepseek-ai/dsh-*` 开发依赖从 0.2.1-rc.1 升到 0.2.1-rc.5，类型检查与编译产物改为针对 rc.5 生成；`pnpm-workspace.yaml` 的 `minimumReleaseAgeExclude` 同步指向 rc.5。
+
+**测试面。** `pnpm typecheck`（两份 tsconfig）与全量 225 项测试在 0.2.1-rc.5 依赖上通过。运行时兼容性判定维持 0.7.3 的结论：rc.5 落在已声明的 peer 范围内，bundle 不会被 `evaluatePluginCompatibility` 跳过。
+
 ## 0.7.3
 
 恢复 dsh 0.2.0 兼容。0.7.2 把 `@deepseek-ai/dsh-*` peer 收窄到 `^0.2.1-rc.1`，但 0.7.1 → 0.7.2 的 `src/` 一行未改——这次收窄只是声明层面的变化，却让 0.2.0 线在重启后失去整个插件。

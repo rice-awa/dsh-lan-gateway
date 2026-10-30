@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A DeepSeek Harness (dsh) plugin: `@riceawa/dsh-lan-gateway`. `dsh web` hard-refuses `--host 0.0.0.0`, so dsh keeps binding `127.0.0.1` and this plugin runs its own reverse-proxy gateway on the unspecified address (dual-stack), rewriting `Host`/`Origin` back to loopback. Since 0.5.0 the model is default-deny (hardening for QVD-2026-57410): every source, loopback included, must present a gateway session, and against a session-capable dsh base the gateway relays one shared upstream browser session so upstream authorization still gates every request. Built against dsh 0.2.1-rc.1: `engines.dsh` and the `@deepseek-ai/dsh-*` peers both declare `^0.2.0-rc.1 || ^0.2.1-rc.1`, so either 0.2.x line loads; 0.1.7 and earlier are no longer supported.
+A DeepSeek Harness (dsh) plugin: `@riceawa/dsh-lan-gateway`. `dsh web` hard-refuses `--host 0.0.0.0`, so dsh keeps binding `127.0.0.1` and this plugin runs its own reverse-proxy gateway on the unspecified address (dual-stack), rewriting `Host`/`Origin` back to loopback. Since 0.5.0 the model is default-deny (hardening for QVD-2026-57410): every source, loopback included, must present a gateway session, and against a session-capable dsh base the gateway relays one shared upstream browser session so upstream authorization still gates every request. Built against dsh 0.2.1-rc.5: `engines.dsh` and the `@deepseek-ai/dsh-*` peers both declare `^0.2.0-rc.1 || ^0.2.1-rc.1`, so either 0.2.x line loads; 0.1.7 and earlier are no longer supported.
 
 ## Commands
 
