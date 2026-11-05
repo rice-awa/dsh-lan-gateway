@@ -7,13 +7,11 @@
  *    installs a getRandomValues-backed `randomUUID` on the Crypto prototype at
  *    module scope. With TLS enabled the origin is secure and the shim is a
  *    no-op.
- * 2. Settings card: registers the LAN gateway card into the official Plugins
- *    page as THIS bundle's own configuration (`plugins.bundle.config`, keyed by
- *    the package name), so port, CIDRs, auth, and TLS stay adjustable from the
- *    GUI on the plugin's own page. `plugins.item` is deliberately not used: dsh
- *    reserves it for the official settings pages, one companion package per
- *    host-plane namespace, and a bundle's configuration belongs in its own
- *    config slot instead.
+ * 2. The gateway's configuration page body: registered into the official
+ *    Plugins page as THIS bundle's own configuration
+ *    (`plugins.bundle.config`, keyed by the package name), with its copy in a
+ *    locale namespace so the card follows Settings → Language, and its fields
+ *    staged over the platform's shared settings form (`ctx.configForms`).
  */
 
 /** RFC 4122 v4 UUID from crypto.getRandomValues (available on insecure origins). */
@@ -67,14 +65,18 @@ installRandomUuidShim()
 import type { Context } from '@deepseek-ai/cordis'
 // Type-only, and never bundled: the `slots` service declaration (owned by the
 // renderer, which installs the registry), the Plugins page's slot contract
-// (`plugins.bundle.config`), and the settings domain's `configForms` service all
-// resolve from the web shell's frozen module table. Importing them is what
-// subjects the registration below to the platform's own contract instead of a
-// local copy that drifts the next time upstream renames a slot or a service.
+// (`plugins.bundle.config`), the settings domain's `configForms` service, and
+// the locale registry all resolve from the web shell's frozen module table.
+// Importing them is what subjects the registration below to the platform's own
+// contract instead of a local copy that drifts the next time upstream renames a
+// slot or a service.
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+import type {} from '@deepseek-ai/dsh-client-locale/client'
 import { LanGatewayCard } from './lan-gateway-card.tsx'
+import { EN, LAN_GATEWAY_LOCALE, ZH } from './locale.ts'
+import { injectStyles } from './styles.ts'
 
 export const name = 'dsh-lan-gateway'
 
@@ -91,8 +93,8 @@ const PACKAGE_NAME = '@riceawa/dsh-lan-gateway'
  */
 const ENTRY_ID = 'dsh-lan-gateway'
 
-/** The slots service the card rides, and the settings mirror the gate reads. */
-export const inject = ['slots', 'configForms']
+/** The services the card rides: slots, the locale registry, and the settings form. */
+export const inject = ['slots', 'locale', 'configForms']
 
 /**
  * Mount the settings card and the UUID shim.
@@ -100,25 +102,36 @@ export const inject = ['slots', 'configForms']
  */
 export function apply(ctx: Context): void {
   installRandomUuidShim()
+  // Inserted once per page and removed with the plugin tree.
+  ctx.effect(() => injectStyles(), 'dsh-lan-gateway: card styles')
 
-  // The card is this bundle's own configuration page. Like ModLens it registers
-  // with no inject face and fetches its own loopback config route, so it depends
-  // on no settings, locale, or connection service.
+  // The card's copy lives in the locale registry, so a Settings → Language
+  // switch re-renders it in place (the renderer derives each entry's `t` from
+  // the namespace and the locale revision). Registering before the slot means
+  // the first render already has its dictionary.
+  ctx.effect(() => ctx.locale.register(LAN_GATEWAY_LOCALE, { zh: ZH, en: EN }),
+    'dsh-lan-gateway: locale dictionary')
+
+  // The card is this bundle's own configuration page, and it edits through the
+  // same shared form the official pages use: `configForms.get(entryId)` is a
+  // revision-fenced view over the profile entry, so a save is one document
+  // mutation rather than a bespoke route, and it works from any browser dsh
+  // itself admits.
   //
   // It rides `plugins.bundle.config`, keyed by the bundle's package name, which
   // is the slot dsh declares for exactly this: dsh 0.1.7+ lists a bundle's own
   // configuration on the bundle's page, and it reserves `plugins.item` for the
   // official settings pages ("one companion package per host-plane namespace").
-  // Registering there made the card pose as an official plugin; the dsh 0.2
-  // Plugins page still declares that slot, so nothing failed loudly.
   //
   // `whileServed` keeps the entry off the page until the Host's settings mirror
   // serves this plugin's entry. That is the one gate worth having: without a
   // Loader entry there is nothing to write to, and the card would appear only
-  // to fail every save with the route's 409.
+  // to fail every save.
   ctx.effect(() => ctx.configForms.whileServed([ENTRY_ID], () =>
     ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({
       name: 'plugins.bundle.config',
       key: PACKAGE_NAME,
+      locale: LAN_GATEWAY_LOCALE,
+      inject: () => ({ entryId: ENTRY_ID, configForms: ctx.configForms }),
     }, LanGatewayCard))))
 }

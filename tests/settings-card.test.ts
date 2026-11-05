@@ -19,7 +19,9 @@ import { describe, expect, it } from 'vitest'
 import { apply, inject } from '../src/client/index.ts'
 import {
   FIELDS,
+  LOCALE_NAMESPACE,
   LanGatewayCard,
+  SPECS,
   formatValue,
   parseValue,
   passwordProblem,
@@ -67,6 +69,26 @@ describe('settings-card tri-state field', () => {
 
   it('rejects an unknown option rather than inventing a value', () => {
     expect(parseValue(secureCookies, 'yes')).toBeUndefined()
+  })
+})
+
+describe('settings-card platform field specs', () => {
+  it('derives one spec per shared field, in table order', () => {
+    // The form model stages over these specs; a field missing here renders no
+    // control, and a field the table does not carry would be unrenderable.
+    expect(SPECS.map(spec => spec.field)).toEqual(FIELDS.map(def => def.field))
+  })
+
+  it('keeps "auto" a clear and an explicit false a set through the platform codec', () => {
+    // The form model asks the spec, not `parseValue`, so the same distinction
+    // has to survive one level up: `auto` unsets the user layer, `false` writes
+    // it. A spec that collapsed both would re-arm the /__login loop.
+    const spec = SPECS.find(entry => entry.field === 'secureCookies')!
+    expect(spec.format(undefined)).toBe('auto')
+    expect(spec.parse('auto')).toEqual({ kind: 'clear' })
+    expect(spec.parse('false')).toEqual({ kind: 'set', value: false })
+    expect(spec.parse('true')).toEqual({ kind: 'set', value: true })
+    expect(spec.parse('yes')).toBeUndefined()
   })
 })
 
@@ -141,6 +163,8 @@ interface Registration {
   name: string
   key?: string
   id?: string
+  locale?: string
+  inject?: () => Record<string, unknown>
   component: unknown
 }
 
@@ -163,7 +187,19 @@ function fakeClientContext(): {
 
   const ctx = {
     effect(body: () => unknown) { body() },
+    locale: {
+      register(_namespace: string, _dicts: unknown): () => void {
+        return () => { /* nothing mounted */ }
+      },
+    },
     configForms: {
+      get(_entryId: string) {
+        return {
+          getSnapshot: () => ({ status: 'ready', value: undefined, base: undefined, user: undefined, writable: true, revision: 0 }),
+          subscribe: () => () => { /* nothing mounted */ },
+          mutate: async () => true,
+        }
+      },
       whileServed(
         namespaces: readonly string[],
         register: (served: ReadonlySet<string>) => () => void,
@@ -199,11 +235,13 @@ function fakeClientContext(): {
 }
 
 describe('settings-card slot registration', () => {
-  it('requires the slots ledger and the settings mirror', () => {
+  it('requires the slots ledger, the settings mirror, and the locale registry', () => {
     // The card mounts through `slots`; the gate that decides whether the Host
-    // can serve a write at all reads `configForms`.
+    // can serve a write at all reads `configForms`; its copy resolves through
+    // the locale registry so Settings → Language re-renders it in place.
     expect(inject).toContain('slots')
     expect(inject).toContain('configForms')
+    expect(inject).toContain('locale')
   })
 
   it("registers as this bundle's own configuration, under the profile entry id", () => {
@@ -224,6 +262,13 @@ describe('settings-card slot registration', () => {
     expect(h.registrations[0]?.name).toBe('plugins.bundle.config')
     expect(h.registrations[0]?.key).toBe('@riceawa/dsh-lan-gateway')
     expect(h.registrations[0]?.component).toBe(LanGatewayCard)
+    // The registration declares the namespace its `t` seat comes from, and
+    // injects the entry id + form service the card writes through.
+    expect(h.registrations[0]?.locale).toBe(LOCALE_NAMESPACE)
+    expect(h.registrations[0]?.inject?.()).toMatchObject({
+      entryId: 'dsh-lan-gateway',
+      configForms: expect.anything(),
+    })
   })
 
   it('withdraws the card once the Host stops serving the entry', () => {

@@ -6,7 +6,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/DeepSeek%20Harness-4d6bfe?logo=deepseek&logoColor=fff&style=flat-square" alt="DeepSeek Harness" />
-  <img src="https://img.shields.io/badge/version-0.7.4-2b7fff?style=flat-square" alt="version 0.7.4" />
+  <img src="https://img.shields.io/badge/version-0.8.0-2b7fff?style=flat-square" alt="version 0.8.0" />
   <img src="https://img.shields.io/badge/TLS-8b5cf6?logo=lock&logoColor=fff&style=flat-square" alt="TLS" />
   <img src="https://img.shields.io/github/license/rice-awa/dsh-lan-gateway?style=flat-square" alt="MIT license" />
   <a href="https://awesome-dsh-plugin.com"><img src="https://awesome-dsh-plugin.com/badge.svg" alt="awesome · DSH plugin" /></a>
@@ -14,7 +14,7 @@
 
 `dsh web` 明确拒绝 `--host 0.0.0.0`，以免把远程代码执行暴露到网络。本插件的做法是让 dsh 继续只绑 `127.0.0.1`，另起一个反向代理监听未指定地址（双栈，IPv4 与 IPv6 客户端都可接入），转发到 loopback 端口并改写 `Host` / `Origin`。
 
-默认拒绝：loopback、LAN、公网三种来源都要先在网关登录页取得 HMAC 会话 cookie，LAN 免密需要显式打开 `lanPasswordless`，默认关闭。底座要求 **dsh 0.2.0 / 0.2.1**：`engines.dsh` 与 `@deepseek-ai/dsh-*` peer 范围同时声明这两条线，无论底座按哪个字段判定兼容性都能通过；0.1.7 及更早版本不再支持。网关在进程内中继一条共享上游会话，上游自身的授权仍然把关每个请求，网关只决定谁可以使用这条会话。
+默认拒绝：loopback、LAN、公网三种来源都要先在网关登录页取得 HMAC 会话 cookie，LAN 免密需要显式打开 `lanPasswordless`，默认关闭。底座要求 **dsh 0.2.0 / 0.2.1 / 0.2.2**：`engines.dsh` 与 `@deepseek-ai/dsh-*` peer 范围同时声明这三条线，无论底座按哪个字段判定兼容性都能通过；0.1.7 及更早版本不再支持。网关在进程内中继一条共享上游会话，上游自身的授权仍然把关每个请求，网关只决定谁可以使用这条会话。
 
 dsh 0.2.1 的 `--host` 可以绑定单个本机网卡地址（通配地址仍被拒绝），`--tls-cert` / `--tls-key` 可直接提供 HTTPS。网关的定位不变：它负责通配监听、登录门禁与自签名证书，并始终向 `127.0.0.1` 转发。若改用 dsh 自己的 `--host` 直接绑定网卡，请关闭网关——两者不要同时使用。
 
@@ -72,7 +72,13 @@ lan_gateway disable           # 关闭
 
 ## 配置
 
-所有可调项都写在本插件自己的 profile 条目里（dsh ≥ 0.1.7 起，设置写入按**条目 id** 寻址；此前的 `lan-gateway` 用户设置命名空间已随 `settingsScope` 一起移除）。打开侧边栏的 **Plugins** 页 →「已安装」→ `@riceawa/dsh-lan-gateway`：本插件的配置就渲染在这个包自己的页面上——挂的是 dsh 给「bundle 自己的配置」声明的 `plugins.bundle.config` 槽（按**包名** `@riceawa/dsh-lan-gateway` 挂载，与 dsh-mnemon、dshmarket 等插件同一套机制），页面标题、图标与面包屑由 Plugins 页自己绘制。保存即生效，监听器会按新配置自动重启。宿主机上用 `127.0.0.1` / `localhost` 打开网关地址时该页面同样可用（网关只对宿主机本机浏览器放行它的管理前缀，见「安全模型」），桌面版（`dsh-app://app`）里也照常读写（见 0.7.1）；用局域网 IP、域名或从别的机器访问时页面读不到配置，改用 `lan_gateway` 工具。注册只在底座确实 served 本插件条目时发生——没有 Loader 条目（写入必然 409）时页面不会出现。下表既是卡片字段，也是配置键；页面顶部另有一栏「登录密码」，改密码不走配置表（见下「登录密码」）：
+所有可调项都写在本插件自己的 profile 条目里（dsh ≥ 0.1.7 起，设置写入按**条目 id** 寻址）。打开侧边栏的 **Plugins** 页 →「已安装」→ `@riceawa/dsh-lan-gateway`：本插件的配置就渲染在这个包自己的页面上——挂的是 dsh 给「bundle 自己的配置」声明的 `plugins.bundle.config` 槽（按**包名** `@riceawa/dsh-lan-gateway` 挂载，与 dsh-mnemon、dshmarket 等插件同一套机制），页面标题、图标与面包屑由 Plugins 页自己绘制。
+
+**表单本身是 dsh 的原生设置表单。** 字段由平台的 `SettingsFormModel` / `SettingsForm` / `SettingsValueField` 渲染（开关用 `Switch`，枚举用 `SegmentedControl`，状态用 `Tag`），读写走 `ctx.configForms.get('dsh-lan-gateway')` 这一条与官方插件页相同的、带版本围栏的配置写入通道：改动先在本地暂存，点「保存」才一次性提交，保存后监听器按新配置自动重启。文案注册在自己的 locale 命名空间 `dshLanGateway` 里，跟随 Settings → Language 切换中英文。
+
+因为写路径换成了 dsh 自己的设置服务，**能用 dsh 的浏览器就能改网关配置**——包括经网关访问的 LAN / 公网浏览器（它们骑的是同一条共享上游会话）。这与 0.7.x 及更早的「只有宿主机回环能写」不同，是改用原生表单的直接代价，见「安全模型」。登录密码仍然只走宿主机回环（见下「登录密码」）。
+
+页面顶部另有一行运行状态（端口 / TLS / 上次错误），由插件自己的只读路由 `GET /lan-gateway/config` 提供；这个路由的 `POST` 写入口为兼容旧版客户端保留，新版卡片不再使用它。下表既是卡片字段，也是配置键：
 
 | 键 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -181,10 +187,11 @@ lan_gateway disable           # 关闭
 ## 安全模型
 
 - **来源分级只认 `socket.remoteAddress`**（IPv4-mapped IPv6 会先解包），分 loopback / lan / internet 三档，绝不信任 `X-Forwarded-For`。分级本身不授予任何访问，每一档默认都要出示有效网关会话，否则 302 到 `/__login`。
-- **LAN 免密是显式 opt-in**。`lanPasswordless: true` 只让命中 `lanCidrs` 或 loopback 的来源跳过网关自己的登录页；受支持的底座（0.2.0 / 0.2.1）上游会话仍把关每个请求。底座没有浏览器会话认证时这个开关拒绝启用，否则等同于把 QVD-2026-57410 原样恢复。
+- **LAN 免密是显式 opt-in**。`lanPasswordless: true` 只让命中 `lanCidrs` 或 loopback 的来源跳过网关自己的登录页；受支持的底座（0.2.0 / 0.2.1 / 0.2.2）上游会话仍把关每个请求。底座没有浏览器会话认证时这个开关拒绝启用，否则等同于把 QVD-2026-57410 原样恢复。
 - **共享上游会话中继**。dsh 0.2 不再信任回环 Host，要求出示 HMAC 签名的 `dsh-auth-*` cookie。插件经 `connection` 服务拿到启动令牌，在回环传输上做一次浏览器等价的令牌换取，取得 cookie 后中继到每个转发请求；上游一旦 401 就丢弃这条会话并重新换取。这仍是「单密码 = 单操作者」：通过网关登录的用户共用同一条上游会话，持钥的上游才是真正的授权主体。
 - **登录页**。`/__login` 由网关独占、不转发。密码以 scrypt 校验，每写一次重新加盐；登录尝试按来源限流（5 次 / 分钟）。
 - **会话 cookie** 是 `payload.signature` 结构（HMAC-SHA256），带撤销 epoch 与逐会话 id，`HttpOnly; SameSite=Strict`。登出撤销的是当前这条会话：它建立的 WebSocket 一并断开，其他设备不受影响。改密、清密、`rotate-secret` 递增 epoch，作废全部已签发 cookie 并断开全部已建立的 WebSocket，客户端需要重新登录。清空密码会直接停止监听。
+- **配置写入由 dsh 自己的授权把关，不再只限宿主机**。卡片走 dsh 原生设置表单（`ctx.configForms`），因此任何被 dsh 承认的浏览器都能编辑本插件的配置——包括经网关登录的 LAN / 公网浏览器，它们与宿主机共享同一条上游会话。能改的范围是下面这张配置表（端口、CIDR、TLS、`lanPasswordless` 等）；改密仍是宿主机回环专属。不想要这个面，就把网关密码当成部署级凭据来管理。
 - **管理面不外泄**。`/lan-gateway/*`（含配置路由与改密路由）由网关独占：唯一放行的是**宿主机本机浏览器**，即「TCP 来源为 loopback **且** 浏览器地址栏写的是回环权威（`127.0.0.1` / `localhost` / `::1`）」的请求，其余一律 403 不转发，远程访问者无法借网关改写 Host 触及本机 loopback 的配置接口。两个条件缺一不可：来源一项远程无法伪造，地址一项则挡住受信 TLS 终止代理的部署——那里所有请求的 TCP 来源都是代理自己的回环地址，只有回环权威仍被拒。放行的请求照样要过会话门与 CSRF 围栏，再以改写后的 loopback Host 交给插件自己的回环同源围栏。升级请求（WebSocket）不在此列，一律拒。原生 `/lan-gateway/config` 只应答回环 Host 且同源的请求。远程管理走 `lan_gateway` 工具。
 - **CSRF 围栏**（HTTP 与 WebSocket）。网关把 Origin 改写回 loopback，会蒙蔽 dsh 自身的 CSRF 防线，所以在改写前对每个转发请求自检：`sec-fetch-site: cross-site` 直接拒；Origin 必须匹配访问者实际使用的网关权威来源；状态变更方法与 WebSocket 升级请求必须携带同源 Origin，否则 403。
 - **未设置密码时拒绝监听**，与来源无关。
@@ -206,7 +213,7 @@ client bundle 在模块级给 `Crypto` 原型补一个基于 `crypto.getRandomVa
 ## 开发
 
 ```bash
-pnpm test        # 219 项
+pnpm test        # 228 项
 pnpm typecheck   # tsc 双端（host + client）
 ```
 
@@ -221,8 +228,10 @@ pnpm typecheck   # tsc 双端（host + client）
 ✓ tests/x509.test.ts                           ( 6) 自签名证书 DER/SAN/签名/TLS 握手
 ✓ tests/tls.test.ts                            ( 9) 证书持久化 / 到期换发 / 重生成 / 自定义证书加载
 ✓ tests/uuid-shim.test.ts                      ( 3) 不安全源补丁 / 安全源 no-op / v4 正确性
-✓ tests/settings-card.test.ts                  (18) 设置页字段编解码（三态 auto ↔ false 不可混淆）/
-                                                    卡片注册槽与条目 id 契约 / 密码草稿闸门（长度与确认）/
+✓ tests/settings-card.test.ts                  (20) 设置页字段编解码（三态 auto ↔ false 不可混淆）/
+                                                    平台字段 spec 与共享字段表一一对应 /
+                                                    卡片注册槽、locale 命名空间与注入面契约 /
+                                                    密码草稿闸门（长度与确认）/
                                                     密码状态徽标三态（缺字段 = 未知，不是「未设置」）/
                                                     「网关自己拒绝」与其它失败的文案分流
 ✓ tests/integration/gateway.test.ts            (30) 真实网关端到端：全来源登录 / LAN 豁免 / 跨站 403 / 升级拒绝 /

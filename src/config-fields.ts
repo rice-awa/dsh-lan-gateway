@@ -71,6 +71,9 @@ export interface FieldDef {
 /** The three states of a tri-state field, in display order. */
 export const TRISTATE_OPTIONS = ['auto', 'true', 'false'] as const
 
+/** One tri-state option, as the card's copy keys it (`opt.<option>`). */
+export type TristateOption = (typeof TRISTATE_OPTIONS)[number]
+
 /**
  * The editable settings, in display order. Adding a config key means adding it
  * here (the host whitelist and the card's controls both follow), to the

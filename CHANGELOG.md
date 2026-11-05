@@ -1,5 +1,19 @@
 # 更新日志
 
+## 0.8.0
+
+配置页改用 dsh 原生插件前端 UI，并适配 dsh 0.2.2-rc.1。
+
+**表单换成平台的设置组件。** 卡片不再自绘输入框、下拉与按钮，而是用 `@deepseek-ai/dsh-client-ui-primitives` 的 `SettingsFormModel` + `SettingsForm` + `SettingsValueField` / `SettingsSecretField`，布尔字段用 `Switch`，枚举与三态字段用 `SegmentedControl`，状态徽标用 `Tag`——与 dsh-mnemon 等已安装插件同一套做法。字段仍然全部来自共享的 `FIELDS` 表（`SPECS` 由它派生），所以「卡片能渲染哪些键」与「宿主配置路由接受哪些键」不会分叉。
+
+**写路径改为 `ctx.configForms`。** 读写成 dsh 自己的、带版本围栏的 per-entry 配置表单（`configForms.get('dsh-lan-gateway')`，注册用 `configForms.whileServed` 把关）：改动先暂存，点保存后一次性提交，冲突由 revision 围栏处理。这带来一处**行为变化**：配置不再只能从宿主机回环写——任何被 dsh 授权的浏览器（包括经网关登录的 LAN / 公网浏览器，它们骑共享上游会话）都能改本插件配置。登录密码不受影响，仍只走宿主机回环的 `/lan-gateway/password`。宿主的 `POST /lan-gateway/config` 为兼容旧版客户端保留，新卡片不再调用它。
+
+**文案与样式。** 中英文案移入 `src/client/locale.ts`，注册为 locale 命名空间 `dshLanGateway`（`ctx.locale.register`），跟随 Settings → Language 切换；注册时声明 `locale:` 并把 `entryId` / `configForms` 通过 `inject` 注入。少量布局规则移入 `src/client/styles.ts`，一次性注入 `<style>`，随插件树卸载。`package.json` 的 `dsh.client.inject` 补上 `dsh-client-ui-renderer` / `dsh-client-ui-settings` / `dsh-client-locale` 三个加载期依赖。
+
+**适配 dsh 0.2.2-rc.1。** 开发依赖整体升到 0.2.2-rc.1（`schemastery` 3.18.5 → 3.19.0，`dsh-settings` / `dsh-tools` 的 peer 随之带 `~3.19.0`）；`engines.dsh` 与两个 dsh peer 扩展为 `^0.2.0-rc.1 || ^0.2.1-rc.1 || ^0.2.2-rc.1`，三条 0.2.x 线都通过兼容性判定。客户端契约（槽名、`ConfigForms`、primitives 组件 props、locale 服务）在 0.2.1-rc.5 与 0.2.2-rc.1 之间未变。
+
+**测试面。** 新增 `tests/stubs/ui-primitives.ts` 与 `vitest.config.ts` 别名：primitives 的 UI 依赖树（shiki、katex 等）不在本仓库安装，测试进程只加载桩，类型检查仍对真实类型。新增 3 项测试（`SPECS` 与 `FIELDS` 一一对应、`auto` / `false` 经平台 codec 仍可区分、注册带 locale 与注入面），测试总数 225 → 228。`pnpm typecheck`、`pnpm test`、`pnpm build` 全部通过；构建产物 `lib/client.js` 只 `require` `react`、`react/jsx-runtime` 与 `@deepseek-ai/dsh-client-ui-primitives` 三个外部模块。
+
 ## 0.7.4
 
 适配 dsh 0.2.1-rc.5。`src/` 一行未改：`engines.dsh` 与 `@deepseek-ai/dsh-*` peer 仍为 `^0.2.0-rc.1 || ^0.2.1-rc.1`，rc.5 与它们处于同一个 0.2.1 版本元组，声明层面无需调整。
